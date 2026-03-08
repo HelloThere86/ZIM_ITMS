@@ -1,98 +1,145 @@
 import cv2
 import numpy as np
 import easyocr
-import json
+import sqlite3
 import os
+import time
 from datetime import datetime
 from ultralytics import YOLO
 import tensorflow as tf
 
+# --- CONFIGURATION ---
+VIDEO_SOURCE = 'test_traffic.mp4' # Change to 0 for Webcam
+MODEL_PATH = 'zimbabwe_traffic_model.h5'
+DB_PATH = '../database/itms_production.db'
+CONFIDENCE_THRESHOLD = 96.0 # Strict threshold for exemption
+
 print("Initializing ITMS Edge AI...")
 
 # 1. Load Models
-yolo_model = YOLO('yolov8n.pt') # YOLO for car detection
-cnn_model = tf.keras.models.load_model('zimbabwe_traffic_model.h5') # Your Custom CNN
-reader = easyocr.Reader(['en']) # OCR for plates
+print("... Loading YOLOv8 ...")
+yolo_model = YOLO('yolov8n.pt') 
 
-classes = ['ambulance', 'civilian_car', 'fire_truck', 'police_car']
-DB_PATH = "violation_database.json"
+print("... Loading Custom Exemption CNN ...")
+if os.path.exists(MODEL_PATH):
+    cnn_model = tf.keras.models.load_model(MODEL_PATH)
+    classes = ['ambulance', 'civilian_car', 'fire_truck', 'police_car']
+else:
+    print(f"ERROR: {MODEL_PATH} not found! Please download it from Drive.")
+    exit()
 
-# Initialize JSON DB if it doesn't exist
-if not os.path.exists(DB_PATH):
-    with open(DB_PATH, "w") as f:
-        json.dump([], f)
+print("... Loading OCR Engine ...")
+reader = easyocr.Reader(['en'], gpu=False) # Set gpu=True if you have NVIDIA CUDA
 
-# 2. Setup Video Stream (Use a traffic video file instead of live webcam)
-# REPLACE 'test_traffic.mp4' with a video file when running
-cap = cv2.VideoCapture('test_traffic.mp4') 
+# 2. Database Logger
+def log_violation(plate, v_class, conf, frame_img):
+    """Logs violation to SQLite Database"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Save the image snapshot
+        img_filename = f"violation_{int(time.time())}.jpg"
+        img_path = os.path.join("../dashboard/evidence", img_filename)
+        os.makedirs("../dashboard/evidence", exist_ok=True)
+        cv2.imwrite(img_path, frame_img)
+        
+        # Determine Status
+        # If AI says Emergency but low confidence -> REVIEW
+        # If AI says Civilian -> APPROVED (Auto-fine)
+        status = 'Pending'
+        decision = 'LoggedOnly'
+        
+        if v_class == 'civilian_car':
+            status = 'AutoApproved'
+            decision = 'Auto'
+        elif conf < CONFIDENCE_THRESHOLD:
+            status = 'Pending' # Flag for human review
+            decision = 'Flagged'
+        else:
+            status = 'Rejected' # Exemption granted automatically
+            decision = 'Auto'
 
-# Define Virtual Stop Line
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        c.execute('''INSERT INTO violation 
+                     (plate_number, timestamp, image_path, confidence_score, decision_type, status, review_note) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                  (plate, timestamp, img_filename, float(conf), decision, status, f"Detected Class: {v_class}"))
+        
+        conn.commit()
+        conn.close()
+        print(f"💾 [DATABASE] Logged: {plate} | {v_class} | {status}")
+        
+    except Exception as e:
+        print(f"❌ Database Error: {e}")
+
+# 3. Process Video
+cap = cv2.VideoCapture(VIDEO_SOURCE)
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-line_y = int(height * 0.7) if height > 0 else 300
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-def log_violation(plate_text, vehicle_class, conf):
-    with open(DB_PATH, "r") as f:
-        data = json.load(f)
-    
-    data.append({
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "plate_number": plate_text,
-        "vehicle_class": vehicle_class,
-        "ai_confidence": round(float(conf), 2)
-    })
-    
-    with open(DB_PATH, "w") as f:
-        json.dump(data, f, indent=4)
-    print(f"[LOGGED] Plate: {plate_text} | Class: {vehicle_class} | Conf: {conf:.2f}%")
+# Virtual Loop Line (70% down the screen)
+line_y = int(height * 0.7)
+
+print("System Online. Processing Video...")
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret: break
 
-    # Draw Red Light Line
+    # Draw Red Line
     cv2.line(frame, (0, line_y), (width, line_y), (0, 0, 255), 3)
+    cv2.putText(frame, "ENFORCEMENT ZONE", (10, line_y - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
 
     # YOLO Detection
     results = yolo_model(frame, verbose=False)
     
     for box in results[0].boxes:
         x1, y1, x2, y2 = map(int, box.xyxy[0])
-        if int(box.cls[0]) in[2, 3, 5, 7]: # Cars, buses, trucks
+        cls = int(box.cls[0])
+        
+        # 2=Car, 3=Motorcycle, 5=Bus, 7=Truck
+        if cls in [2, 3, 5, 7]:
             
-            # Check if crossing the red line
-            if y2 > line_y and y2 < line_y + 15: # Only trigger exactly when crossing
+            # Check for Line Crossing (Bottom of car hits line)
+            if y2 > line_y and y2 < line_y + 10: # Only trigger once per car
                 
-                # CROP THE CAR IMAGE for the CNN
+                # --- EXEMPTION CHECK ---
                 car_crop = frame[y1:y2, x1:x2]
                 if car_crop.size == 0: continue
                 
-                # --- EXEMPTION LOGIC (Your CNN) ---
+                # Preprocess for CNN
                 img_resized = cv2.resize(car_crop, (150, 150))
                 img_array = tf.expand_dims(img_resized / 255.0, 0)
                 
-                predictions = cnn_model.predict(img_array, verbose=0)
-                score = tf.nn.softmax(predictions[0])
+                # Predict
+                preds = cnn_model.predict(img_array, verbose=0)
+                score = tf.nn.softmax(preds[0])
                 pred_class = classes[np.argmax(score)]
                 confidence = 100 * np.max(score)
                 
-                # --- OCR (Read Plate) ---
-                plate_text = "UNKNOWN"
-                ocr_result = reader.readtext(car_crop)
-                if ocr_result:
-                    plate_text = ocr_result[0][1] # Get highest confidence text
+                # --- OCR CHECK ---
+                plate_text = "Unknown"
+                try:
+                    ocr_res = reader.readtext(car_crop)
+                    if ocr_res:
+                        plate_text = ocr_res[0][1].upper() # Get text
+                except:
+                    pass
                 
-                # Draw Red Box for Violation
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                # Visual Feedback
+                color = (0, 0, 255) # Red for civilian
+                if pred_class != 'civilian_car':
+                    color = (0, 255, 0) # Green for Emergency
                 
-                # Action based on CNN Output
-                if pred_class == 'civilian_car' or confidence < 96.0:
-                    log_violation(plate_text, pred_class, confidence)
-                else:
-                    print(f"🚨 EXEMPTION GRANTED: {pred_class.upper()} ({confidence:.2f}%)")
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                cv2.putText(frame, f"{pred_class.upper()} {confidence:.1f}%", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                # Log to DB
+                log_violation(plate_text, pred_class, confidence, car_crop)
 
-    # Display (Optional: comment out if running on cloud)
-    cv2.imshow("ITMS Detection", frame)
+    cv2.imshow("ITMS Camera Feed", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
