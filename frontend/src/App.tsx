@@ -10,6 +10,7 @@ import { EvidenceSearchPage } from "./pages/EvidenceSearchPage";
 import { SystemHealthPage } from "./pages/SystemHealthPage";
 import { AuditTrailPage } from "./pages/AuditTrailPage";
 import { ConfigPage } from "./pages/ConfigPage";
+import { FineSchedule } from "./pages/FineSchedule";
 
 function App() {
   return (
@@ -28,6 +29,7 @@ function App() {
               <Route path="/evidence-search" element={<EvidenceSearchPage />} />
               <Route path="/system-health" element={<SystemHealthPage />} />
               <Route path="/audit-trail" element={<AuditTrailPage />} />
+              <Route path="/fine-schedule" element={<FineSchedule />} />
               <Route path="/config" element={<ConfigPage />} />
               <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Routes>

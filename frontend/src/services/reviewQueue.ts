@@ -1,5 +1,3 @@
-// src/services/reviewQueue.ts
-
 import { fetchJson, postJson } from "./api";
 
 export type ReviewStatus = "Pending" | "Approved" | "Rejected";
@@ -30,12 +28,11 @@ export function getReviewQueue(): Promise<ReviewCase[]> {
 
 export function submitReviewDecision(
   violationId: string,
-  decision: "Approved" | "Rejected",
-  note: string
+  decision: "Approved" | "Rejected"
 ): Promise<ReviewDecisionResponse> {
   return postJson<ReviewDecisionResponse>(`/review-queue/${violationId}/decision`, {
     decision,
     reviewerUserId: null,
-    note,
+    note: "",
   });
 }

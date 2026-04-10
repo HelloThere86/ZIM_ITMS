@@ -8,6 +8,11 @@ export interface Violation {
   time: string;
   confidence: number;
   status: "Flagged" | "Approved" | "Rejected";
+  imagePath?: string | null;
+  videoPath?: string | null;
+  imageUrl?: string | null;
+  videoUrl?: string | null;
+  reviewNote?: string;
 }
 
 export interface Stats {

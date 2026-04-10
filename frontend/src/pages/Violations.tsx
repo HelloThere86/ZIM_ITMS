@@ -1,7 +1,5 @@
-// src/pages/Violations.tsx
 import { useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle,
   CheckCircle2,
   Search,
   Shield,
@@ -14,6 +12,8 @@ import {
   Send,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
+import { PaginationControls } from "../components/PaginationControls";
+import { buildBackendAssetUrl } from "../services/api";
 import {
   getSmsNotifications,
   getStats,
@@ -26,6 +26,8 @@ import {
 
 type StatusFilter = "All" | "Flagged" | "Approved" | "Rejected";
 type SmsDisplayStatus = "Not Sent" | "Sent" | "Skipped" | "Failed" | "Queued";
+
+const ITEMS_PER_PAGE = 10;
 
 export function ViolationsPage() {
   const [selectedViolationId, setSelectedViolationId] = useState<string | null>(null);
@@ -40,6 +42,7 @@ export function ViolationsPage() {
 
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
+  const [currentPage, setCurrentPage] = useState(1);
 
   async function loadData() {
     try {
@@ -86,6 +89,38 @@ export function ViolationsPage() {
     });
   }, [violations, searchTerm, statusFilter]);
 
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredViolations.length / ITEMS_PER_PAGE));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedViolations = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredViolations.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredViolations, currentPage]);
+
+  useEffect(() => {
+    if (filteredViolations.length === 0) {
+      setSelectedViolationId(null);
+      return;
+    }
+
+    const selectedStillExists = selectedViolationId
+      ? filteredViolations.some((violation) => violation.id === selectedViolationId)
+      : false;
+
+    if (!selectedStillExists) {
+      setSelectedViolationId(filteredViolations[0].id);
+    }
+  }, [filteredViolations, selectedViolationId]);
+
   const selectedViolation =
     filteredViolations.find((violation) => violation.id === selectedViolationId) ||
     violations.find((violation) => violation.id === selectedViolationId) ||
@@ -99,6 +134,9 @@ export function ViolationsPage() {
   }, [selectedViolation, smsNotifications]);
 
   const totalCases = stats.Flagged + stats.Approved + stats.Rejected;
+
+  const previewVideoUrl = buildBackendAssetUrl(selectedViolation?.videoUrl);
+  const previewImageUrl = buildBackendAssetUrl(selectedViolation?.imageUrl);
 
   function getStatusClasses(status: Violation["status"]) {
     if (status === "Flagged") {
@@ -201,7 +239,7 @@ export function ViolationsPage() {
       {smsMessage && (
         <section className="rounded-xl border border-blue-200 bg-blue-50 p-4">
           <p className="text-sm font-semibold text-blue-900">SMS result</p>
-          <p className="mt-1 text-sm text-blue-800">{smsMessage}</p>
+          <p className="mt-1 text-sm text-red-800">{smsMessage}</p>
         </section>
       )}
 
@@ -280,80 +318,92 @@ export function ViolationsPage() {
               </div>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full">
-                <thead className="border-b border-gray-200 bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Case ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Plate Number
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Intersection
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Time
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Confidence
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Status
-                    </th>
-                  </tr>
-                </thead>
+            <>
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalItems={filteredViolations.length}
+                itemsPerPage={ITEMS_PER_PAGE}
+                label="violations"
+                onPrevious={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                onNext={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+              />
 
-                <tbody className="divide-y divide-gray-200 bg-white">
-                  {filteredViolations.map((violation) => {
-                    const isSelected = selectedViolationId === violation.id;
+              <div className="overflow-x-auto">
+                <table className="min-w-full">
+                  <thead className="border-b border-gray-200 bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Case ID
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Plate Number
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Intersection
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Time
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Confidence
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
 
-                    return (
-                      <tr
-                        key={violation.id}
-                        onClick={() => {
-                          setSelectedViolationId(violation.id);
-                          setSmsMessage(null);
-                        }}
-                        className={`cursor-pointer transition ${
-                          isSelected ? "bg-gray-50" : "hover:bg-gray-50"
-                        }`}
-                      >
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">
-                          {violation.id}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-900">
-                          {violation.plateNumber}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-900">
-                          {violation.intersection}
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{violation.time}</td>
-                        <td className="px-6 py-4 text-sm">
-                          <span
-                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${getConfidenceClasses(
-                              violation.confidence
-                            )}`}
-                          >
-                            {violation.confidence}% · {getConfidenceLabel(violation.confidence)}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-sm">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                              violation.status
-                            )}`}
-                          >
-                            {violation.status}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                  <tbody className="divide-y divide-gray-200 bg-white">
+                    {paginatedViolations.map((violation) => {
+                      const isSelected = selectedViolationId === violation.id;
+
+                      return (
+                        <tr
+                          key={violation.id}
+                          onClick={() => {
+                            setSelectedViolationId(violation.id);
+                            setSmsMessage(null);
+                          }}
+                          className={`cursor-pointer transition ${
+                            isSelected ? "bg-gray-50" : "hover:bg-gray-50"
+                          }`}
+                        >
+                          <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                            {violation.id}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-900">
+                            {violation.plateNumber}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-900">
+                            {violation.intersection}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{violation.time}</td>
+                          <td className="px-6 py-4 text-sm">
+                            <span
+                              className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${getConfidenceClasses(
+                                violation.confidence
+                              )}`}
+                            >
+                              {violation.confidence}% · {getConfidenceLabel(violation.confidence)}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-sm">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
+                                violation.status
+                              )}`}
+                            >
+                              {violation.status}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
 
@@ -442,6 +492,16 @@ export function ViolationsPage() {
                     </p>
                   </div>
                 </div>
+
+                <div className="flex items-start gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+                  <BadgePercent className="mt-0.5 h-4 w-4 text-blue-600" />
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-blue-500">
+                      Applicable Fine
+                    </p>
+                    <p className="text-sm font-bold text-blue-900">USD $30.00</p>
+                  </div>
+                </div>
               </div>
 
               <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
@@ -474,11 +534,20 @@ export function ViolationsPage() {
                         <span className="font-medium text-gray-900">Provider:</span>{" "}
                         {latestSmsForSelected?.provider ?? "MockSMS / none yet"}
                       </p>
-                      <p>
+
+                      <div className="mt-3 rounded-md border border-gray-200 bg-white p-3 shadow-sm">
+                        <p className="mb-1 text-[10px] font-bold uppercase text-gray-400">
+                          Generated SMS Message Content:
+                        </p>
+                        <p className="text-xs italic leading-relaxed text-gray-600">
+                          {latestSmsForSelected?.messageText ||
+                            "Awaiting system sync to generate message..."}
+                        </p>
+                      </div>
+
+                      <p className="mt-2">
                         <span className="font-medium text-gray-900">Latest Result:</span>{" "}
-                        {latestSmsForSelected?.errorMessage ||
-                          latestSmsForSelected?.messageText ||
-                          "No SMS action has been recorded for this case yet."}
+                        {latestSmsForSelected?.errorMessage || "Validated for transmission."}
                       </p>
                     </div>
 
@@ -497,31 +566,34 @@ export function ViolationsPage() {
               </div>
 
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6">
-                <p className="text-sm font-semibold text-gray-900">Evidence Preview</p>
-                <p className="mt-2 text-sm text-gray-600">
-                  Evidence rendering can be linked here later if you want the violations page to
-                  show a quick image or video preview like the Evidence Search page.
-                </p>
+                <div className="flex items-center gap-2">
+                  <Shield className="h-4 w-4 text-gray-600" />
+                  <p className="text-sm font-semibold text-gray-900">Evidence Preview</p>
+                </div>
 
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <div className="rounded-lg border border-gray-200 bg-white p-4">
-                    <div className="flex items-center gap-2">
-                      <AlertTriangle className="h-4 w-4 text-gray-500" />
-                      <p className="text-sm font-medium text-gray-900">Snapshot</p>
-                    </div>
-                    <p className="mt-2 text-xs text-gray-500">Optional quick preview area</p>
+                {previewVideoUrl ? (
+                  <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-inner">
+                    <video
+                      src={previewVideoUrl}
+                      controls
+                      className="h-48 w-full bg-black object-contain"
+                    />
                   </div>
-
-                  <div className="rounded-lg border border-gray-200 bg-white p-4">
-                    <div className="flex items-center gap-2">
-                      <Shield className="h-4 w-4 text-gray-500" />
-                      <p className="text-sm font-medium text-gray-900">Case Action</p>
-                    </div>
-                    <p className="mt-2 text-xs text-gray-500">
-                      SMS notices can now be triggered from this panel
+                ) : previewImageUrl ? (
+                  <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white shadow-inner">
+                    <img
+                      src={previewImageUrl}
+                      alt="Violation Snapshot"
+                      className="h-48 w-full bg-gray-100 object-contain"
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
+                    <p className="text-xs italic text-gray-500">
+                      No digital evidence file is currently available for this record.
                     </p>
                   </div>
-                </div>
+                )}
               </div>
 
               <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">

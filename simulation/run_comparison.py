@@ -61,7 +61,7 @@ def get_state(tl_id):
 
 def run_fixed_timer():
     print(">>> RUNNING OLD SYSTEM (Fixed Timer)...")
-    traci.start(["sumo", "-c", "sim.sumocfg", "--no-step-log", "true", "--waiting-time-memory", "1000"])
+    traci.start(["sumo-gui", "-c", "sim.sumocfg", "--no-step-log", "true", "--waiting-time-memory", "1000"])
 
     create_zimbabwe_program(TL_ID)
 
@@ -104,7 +104,7 @@ def run_ai_agent():
 
     agent.epsilon = 0.0
 
-    traci.start(["sumo", "-c", "sim.sumocfg", "--no-step-log", "true", "--waiting-time-memory", "1000"])
+    traci.start(["sumo-gui", "-c", "sim.sumocfg", "--no-step-log", "true", "--waiting-time-memory", "1000"])
 
     create_zimbabwe_program(TL_ID)
     traci.trafficlight.setPhase(TL_ID, 0)

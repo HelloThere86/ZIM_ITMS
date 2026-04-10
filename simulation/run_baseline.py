@@ -1,7 +1,6 @@
 import os
 import sys
 import traci
-from sumolib import checkBinary
 
 if 'SUMO_HOME' in os.environ:
     tools = os.path.join(os.environ['SUMO_HOME'], 'tools')
@@ -14,14 +13,9 @@ def create_zimbabwe_program(tl_id):
     logics = traci.trafficlight.getAllProgramLogics(tl_id)
     current_logic = logics[0]
     
-    # The netgenerate map usually has 4 phases: 
-    # 0: NS Green, 1: NS Yellow, 2: EW Green, 3: EW Yellow
-    
-    # We grab the "Green" states from the existing map
     ns_green_state = current_logic.phases[0].state
     ew_green_state = current_logic.phases[2].state
     
-    # Helper to make yellow/red states
     def make_yellow(state):
         return state.replace("G", "y").replace("g", "y")
     
@@ -48,35 +42,40 @@ def create_zimbabwe_program(tl_id):
     # 3. Apply this new logic to the simulation
     new_logic = traci.trafficlight.Logic("custom_zim", 0, 0, phases)
     traci.trafficlight.setCompleteRedYellowGreenDefinition(tl_id, new_logic)
-    print("✅ Zimbabwean Timer (22s-3s-1s) injected successfully!")
+    print(f"✅ Zimbabwean Timer (22s-3s-1s) injected successfully into {tl_id}!")
 
 def run():
     print("Starting Baseline Simulation...")
-    tl_id = "A0"
     
-    # Inject the logic immediately after startup
-    create_zimbabwe_program(tl_id)
+    # APPLY TO BOTH INTERSECTIONS
+    traffic_lights = traci.trafficlight.getIDList()
+    for tl_id in traffic_lights:
+        create_zimbabwe_program(tl_id)
     
     step = 0
-    total_wait_time = 0
+    total_wait_seconds = 0
     
     while step < 3600:
         traci.simulationStep()
         
-        # Track waiting time for the report
+        # Track total waiting time correctly:
+        # Get the number of vehicles halted (speed < 0.1m/s) in this exact second.
+        # 1 halted vehicle in 1 step = 1 second of waiting time.
         for veh_id in traci.vehicle.getIDList():
-            total_wait_time += traci.vehicle.getWaitingTime(veh_id)
+            if traci.vehicle.getSpeed(veh_id) < 0.1:
+                total_wait_seconds += 1
             
         step += 1
 
     traci.close()
-    print("-" * 30)
-    print(f"SIMULATION COMPLETE.")
-    print(f"Total Traffic Jam Time: {total_wait_time/3600:.2f} hours")
-    print("-" * 30)
+    print("-" * 40)
+    print(f"🛑 SIMULATION COMPLETE.")
+    print(f"📊 Total Fleet Wait Time: {total_wait_seconds} seconds")
+    print(f"📊 Equivalent to: {total_wait_seconds/3600:.2f} hours of cumulative gridlock")
+    print("-" * 40)
 
 if __name__ == "__main__":
-    # Start SUMO GUI
-    sumoCmd = ["sumo-gui", "-c", "sim.sumocfg"]
+    # Make sure this points to your new Chaos config file!
+    sumoCmd = ["sumo-gui", "-c", "marl_sim.sumocfg"]
     traci.start(sumoCmd)
     run()

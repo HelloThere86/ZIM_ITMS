@@ -17,6 +17,7 @@ const navItems = [
   { to: "/traffic-results", icon: BarChart3, label: "Traffic Results" },
   { to: "/review-queue", icon: ClipboardCheck, label: "Review Queue" },
   { to: "/evidence-search", icon: Search, label: "Evidence Search" },
+  { to: "/fine-schedule", icon: Receipt, label: "Fine Schedule" },
   { to: "/system-health", icon: Activity, label: "System Health" },
   { to: "/audit-trail", icon: Receipt, label: "Audit Trail" },
   { to: "/config", icon: Settings, label: "Config" },

@@ -1,0 +1,20 @@
+<configuration>
+    <input>
+        <net-file value="marl_network.net.xml"/>
+        <route-files value="marl_traffic.rou.xml"/>
+    </input>
+    
+    <processing>
+        <lateral-resolution value="0.8" />
+        
+        <time-to-teleport value="-1" />
+        
+        <collision.action value="remove" /> 
+        <collision.mingap-factor value="0" />
+    </processing>
+    
+    <time>
+        <begin value="0"/>
+        <end value="3600"/>
+    </time>
+</configuration>

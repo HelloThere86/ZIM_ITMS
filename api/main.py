@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 DB_PATH = PROJECT_ROOT / "database" / "itms_production.db"
 EVIDENCE_DIR = PROJECT_ROOT / "dashboard" / "evidence"
-TRAFFIC_RESULTS_PATH = PROJECT_ROOT / "results" / "traffic_results.json"
+TRAFFIC_RESULTS_PATH = PROJECT_ROOT / "results" / "comparison_results.json"
 
 app = FastAPI(title="ITMS Backend API")
 
@@ -493,6 +493,22 @@ def log_evidence_access(violation_code: str, payload: EvidenceAccessRequest):
         "message": f"Evidence access logged for V-{violation_id}",
         "action": payload.action,
     }
+    
+@app.get("/api/violations/{violation_id}/sms")
+def get_sms_log(violation_id: int):
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("""
+        SELECT status, message_text, recipient_phone, sent_at, error_message 
+        FROM notification_log 
+        WHERE violation_id = ? 
+        ORDER BY notification_id DESC LIMIT 1
+    """, (violation_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row: return dict(row)
+    else: return {"status": "None", "message_text": "No SMS generated yet."}
 
 
 @app.post("/api/violations/{violation_code}/send-sms")
@@ -706,3 +722,12 @@ def update_config(config_key: str, payload: ConfigUpdateRequest):
     conn.close()
 
     return {"message": f"Configuration '{config_key}' updated successfully"}
+
+@app.get("/api/fines")
+def get_fines():
+    conn = get_db()
+    c = conn.cursor()
+    c.execute("SELECT violation_name, fine_amount, currency FROM fine_matrix")
+    rows = c.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]

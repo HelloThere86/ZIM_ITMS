@@ -1,4 +1,3 @@
-// src/pages/ReviewQueuePage.tsx
 import { useEffect, useMemo, useState } from "react";
 import {
   ClipboardCheck,
@@ -11,11 +10,12 @@ import {
   Clock3,
   FileText,
   UserCheck,
-  RefreshCw,
   Image as ImageIcon,
   Video,
+  MapPin,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
+import { PaginationControls } from "../components/PaginationControls";
 import { buildBackendAssetUrl } from "../services/api";
 import {
   getReviewQueue,
@@ -27,6 +27,8 @@ import {
 
 type StatusFilter = "All" | ReviewStatus;
 
+const ITEMS_PER_PAGE = 10;
+
 export function ReviewQueuePage() {
   const [cases, setCases] = useState<ReviewCase[]>([]);
   const [loading, setLoading] = useState(true);
@@ -36,30 +38,31 @@ export function ReviewQueuePage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
-  const [reviewNote, setReviewNote] = useState("");
+  const [currentPage, setCurrentPage] = useState(1);
+
+  async function loadCases() {
+    try {
+      setLoading(true);
+      setError(null);
+
+      const data = await getReviewQueue();
+      setCases(data);
+
+      setSelectedCaseId((prev) => {
+        const stillExists = prev && data.some((item) => item.id === prev);
+        return stillExists ? prev : data[0]?.id ?? null;
+      });
+    } catch (err) {
+      console.error("Failed to load review queue:", err);
+      setError("Failed to load review queue from backend.");
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    async function loadCases() {
-      try {
-        setLoading(true);
-        setError(null);
-
-        const data = await getReviewQueue();
-        setCases(data);
-
-        if (data.length > 0 && !selectedCaseId) {
-          setSelectedCaseId(data[0].id);
-        }
-      } catch (err) {
-        console.error("Failed to load review queue:", err);
-        setError("Failed to load review queue from backend.");
-      } finally {
-        setLoading(false);
-      }
-    }
-
     loadCases();
-  }, [selectedCaseId]);
+  }, []);
 
   const filteredCases = useMemo(() => {
     return cases.filter((item) => {
@@ -76,18 +79,49 @@ export function ReviewQueuePage() {
     });
   }, [cases, searchTerm, statusFilter]);
 
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredCases.length / ITEMS_PER_PAGE));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedCases = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredCases.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredCases, currentPage]);
+
+  useEffect(() => {
+    if (filteredCases.length === 0) {
+      setSelectedCaseId(null);
+      return;
+    }
+
+    const selectedStillExists = selectedCaseId
+      ? filteredCases.some((item) => item.id === selectedCaseId)
+      : false;
+
+    if (!selectedStillExists) {
+      setSelectedCaseId(filteredCases[0].id);
+    }
+  }, [filteredCases, selectedCaseId]);
+
   const selectedCase =
     filteredCases.find((item) => item.id === selectedCaseId) ||
     cases.find((item) => item.id === selectedCaseId) ||
     null;
 
-  useEffect(() => {
-    setReviewNote(selectedCase?.notes ?? "");
-  }, [selectedCase?.id, selectedCase?.notes]);
-
   const pendingCount = cases.filter((item) => item.reviewStatus === "Pending").length;
   const approvedCount = cases.filter((item) => item.reviewStatus === "Approved").length;
   const rejectedCount = cases.filter((item) => item.reviewStatus === "Rejected").length;
+
+  const imageUrl = buildBackendAssetUrl(selectedCase?.imageUrl ?? null);
+  const videoUrl = buildBackendAssetUrl(selectedCase?.videoUrl ?? null);
 
   function getStatusClasses(status: ReviewStatus) {
     if (status === "Pending") {
@@ -116,10 +150,7 @@ export function ReviewQueuePage() {
       setSaving(true);
       setError(null);
 
-      const noteToSend =
-        reviewNote.trim() || `Manual frontend review marked this case as ${nextStatus}.`;
-
-      await submitReviewDecision(selectedCase.id, nextStatus, noteToSend);
+      await submitReviewDecision(selectedCase.id, nextStatus);
 
       setCases((prev) =>
         prev.map((item) =>
@@ -127,7 +158,6 @@ export function ReviewQueuePage() {
             ? {
                 ...item,
                 reviewStatus: nextStatus,
-                notes: noteToSend,
               }
             : item
         )
@@ -139,9 +169,6 @@ export function ReviewQueuePage() {
       setSaving(false);
     }
   }
-
-  const imageUrl = buildBackendAssetUrl(selectedCase?.imageUrl ?? null);
-  const videoUrl = buildBackendAssetUrl(selectedCase?.videoUrl ?? null);
 
   return (
     <div className="space-y-8">
@@ -245,67 +272,79 @@ export function ReviewQueuePage() {
               </div>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full">
-                <thead className="border-b border-gray-200 bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Case ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Plate Number
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Intersection
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Confidence
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Status
-                    </th>
-                  </tr>
-                </thead>
+            <>
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalItems={filteredCases.length}
+                itemsPerPage={ITEMS_PER_PAGE}
+                label="review cases"
+                onPrevious={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                onNext={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+              />
 
-                <tbody className="divide-y divide-gray-200 bg-white">
-                  {filteredCases.map((item) => {
-                    const isSelected = item.id === selectedCaseId;
+              <div className="overflow-x-auto">
+                <table className="min-w-full">
+                  <thead className="border-b border-gray-200 bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Case ID
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Plate Number
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Intersection
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Confidence
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Status
+                      </th>
+                    </tr>
+                  </thead>
 
-                    return (
-                      <tr
-                        key={item.id}
-                        onClick={() => setSelectedCaseId(item.id)}
-                        className={`cursor-pointer transition ${
-                          isSelected ? "bg-gray-50" : "hover:bg-gray-50"
-                        }`}
-                      >
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{item.id}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{item.plateNumber}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{item.intersection}</td>
-                        <td className="px-6 py-4 text-sm">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getConfidenceClasses(
-                              item.confidenceLevel
-                            )}`}
-                          >
-                            {item.confidence}% · {item.confidenceLevel}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-sm">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                              item.reviewStatus
-                            )}`}
-                          >
-                            {item.reviewStatus}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                  <tbody className="divide-y divide-gray-200 bg-white">
+                    {paginatedCases.map((item) => {
+                      const isSelected = item.id === selectedCaseId;
+
+                      return (
+                        <tr
+                          key={item.id}
+                          onClick={() => setSelectedCaseId(item.id)}
+                          className={`cursor-pointer transition ${
+                            isSelected ? "bg-gray-50" : "hover:bg-gray-50"
+                          }`}
+                        >
+                          <td className="px-6 py-4 text-sm font-medium text-gray-900">{item.id}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{item.plateNumber}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{item.intersection}</td>
+                          <td className="px-6 py-4 text-sm">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getConfidenceClasses(
+                                item.confidenceLevel
+                              )}`}
+                            >
+                              {item.confidence}% · {item.confidenceLevel}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-sm">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
+                                item.reviewStatus
+                              )}`}
+                            >
+                              {item.reviewStatus}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
 
@@ -313,7 +352,7 @@ export function ReviewQueuePage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Case Review Detail</h2>
             <p className="mt-1 text-sm text-gray-600">
-              Selected case summary, reviewer context, and manual action controls.
+              Selected case summary, evidence preview, and manual action controls.
             </p>
           </div>
 
@@ -356,6 +395,16 @@ export function ReviewQueuePage() {
                 </div>
 
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
+                  <MapPin className="mt-0.5 h-4 w-4 text-gray-500" />
+                  <div>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                      Intersection
+                    </p>
+                    <p className="text-sm font-medium text-gray-900">{selectedCase.intersection}</p>
+                  </div>
+                </div>
+
+                <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <Clock3 className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
                     <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
@@ -381,7 +430,7 @@ export function ReviewQueuePage() {
                   <FileText className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
                     <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Reviewer Note
+                      Detection Notes
                     </p>
                     <p className="text-sm font-medium text-gray-900">{selectedCase.notes}</p>
                   </div>
@@ -399,36 +448,71 @@ export function ReviewQueuePage() {
               </div>
 
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6">
-                <p className="text-sm font-semibold text-gray-900">Evidence Preview</p>
-                <p className="mt-2 text-sm text-gray-600">
-                  This area is reserved for image or video evidence rendering once backend evidence
-                  URLs are wired into the review queue.
-                </p>
+                <div className="flex items-center gap-2">
+                  {selectedCase.evidenceType === "Video" ? (
+                    <Video className="h-4 w-4 text-gray-600" />
+                  ) : (
+                    <ImageIcon className="h-4 w-4 text-gray-600" />
+                  )}
+                  <p className="text-sm font-semibold text-gray-900">Evidence Preview</p>
+                </div>
+
+                {videoUrl ? (
+                  <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
+                    <video
+                      src={videoUrl}
+                      controls
+                      className="h-64 w-full bg-black object-contain"
+                    />
+                  </div>
+                ) : imageUrl ? (
+                  <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
+                    <img
+                      src={imageUrl}
+                      alt={`Evidence for ${selectedCase.id}`}
+                      className="h-64 w-full bg-gray-100 object-contain"
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
+                    <p className="text-sm text-gray-600">
+                      No preview file is currently available for this case.
+                    </p>
+                  </div>
+                )}
+
+                <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
+                  <p className="text-xs uppercase tracking-wide text-gray-500">Evidence Type</p>
+                  <p className="mt-1 text-sm font-medium text-gray-900">
+                    {selectedCase.evidenceType}
+                  </p>
+                </div>
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <button
                   onClick={() => handleDecision("Approved")}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800 transition hover:bg-green-100"
+                  disabled={saving}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800 transition hover:bg-green-100 disabled:opacity-50"
                 >
                   <CheckCircle2 className="h-4 w-4" />
-                  Approve Case
+                  {saving ? "Saving..." : "Approve Case"}
                 </button>
 
                 <button
                   onClick={() => handleDecision("Rejected")}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800 transition hover:bg-red-100"
+                  disabled={saving}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800 transition hover:bg-red-100 disabled:opacity-50"
                 >
                   <XCircle className="h-4 w-4" />
-                  Reject Case
+                  {saving ? "Saving..." : "Reject Case"}
                 </button>
               </div>
 
               <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-                <p className="text-sm font-semibold text-blue-900">Next backend step</p>
+                <p className="text-sm font-semibold text-blue-900">Current status</p>
                 <p className="mt-2 text-sm text-blue-800">
-                  Replace mock review cases with live backend review records, store reviewer
-                  decisions, and log each review action into the audit trail.
+                  Decisions from this page are saved to the backend and reflected in the audit log.
                 </p>
               </div>
             </div>
@@ -467,7 +551,7 @@ export function ReviewQueuePage() {
           <div className="rounded-lg border border-gray-200 p-4">
             <p className="text-sm font-medium text-gray-900">Audit Readiness</p>
             <p className="mt-2 text-sm text-gray-600">
-              Reviewer decisions can later feed directly into the audit log.
+              Each review decision is captured in your system logs for traceability.
             </p>
           </div>
         </div>

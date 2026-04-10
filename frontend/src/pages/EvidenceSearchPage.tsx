@@ -1,4 +1,3 @@
-// src/pages/EvidenceSearchPage.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Search,
@@ -15,6 +14,7 @@ import {
   Video,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
+import { PaginationControls } from "../components/PaginationControls";
 import { buildBackendAssetUrl } from "../services/api";
 import {
   getEvidenceRecords,
@@ -24,6 +24,8 @@ import {
 } from "../services/evidenceSearch";
 
 type StatusFilter = "All" | EvidenceStatus;
+
+const ITEMS_PER_PAGE = 10;
 
 export function EvidenceSearchPage() {
   const [plateNumber, setPlateNumber] = useState("");
@@ -38,6 +40,7 @@ export function EvidenceSearchPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
   const viewedRecordIdsRef = useRef<Set<string>>(new Set());
 
   async function loadEvidence(params?: {
@@ -54,14 +57,10 @@ export function EvidenceSearchPage() {
       const data = await getEvidenceRecords(params ?? {});
       setRecords(data);
 
-      if (data.length > 0) {
-        setSelectedRecordId((prev) => {
-          const stillExists = prev && data.some((item) => item.id === prev);
-          return stillExists ? prev : data[0].id;
-        });
-      } else {
-        setSelectedRecordId(null);
-      }
+      setSelectedRecordId((prev) => {
+        const stillExists = prev && data.some((item) => item.id === prev);
+        return stillExists ? prev : data[0]?.id ?? null;
+      });
     } catch (err) {
       console.error("Failed to load evidence records:", err);
       setError("Failed to load evidence records from backend.");
@@ -78,8 +77,66 @@ export function EvidenceSearchPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const filteredRecords = useMemo(() => {
+    return records.filter((record) => {
+      const matchesPlate = plateNumber
+        ? record.plateNumber.toLowerCase().includes(plateNumber.toLowerCase())
+        : true;
+
+      const matchesIntersection = intersection
+        ? record.intersection.toLowerCase().includes(intersection.toLowerCase())
+        : true;
+
+      const matchesStatus =
+        statusFilter === "All" ? true : record.status === statusFilter;
+
+      const matchesDateFrom = dateFrom ? record.date >= dateFrom : true;
+      const matchesDateTo = dateTo ? record.date <= dateTo : true;
+
+      return (
+        matchesPlate &&
+        matchesIntersection &&
+        matchesStatus &&
+        matchesDateFrom &&
+        matchesDateTo
+      );
+    });
+  }, [records, plateNumber, intersection, statusFilter, dateFrom, dateTo]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [plateNumber, intersection, dateFrom, dateTo, statusFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRecords.length / ITEMS_PER_PAGE));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedRecords = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredRecords.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredRecords, currentPage]);
+
+  useEffect(() => {
+    if (filteredRecords.length === 0) {
+      setSelectedRecordId(null);
+      return;
+    }
+
+    const selectedStillExists = selectedRecordId
+      ? filteredRecords.some((record) => record.id === selectedRecordId)
+      : false;
+
+    if (!selectedStillExists) {
+      setSelectedRecordId(filteredRecords[0].id);
+    }
+  }, [filteredRecords, selectedRecordId]);
+
   const selectedRecord =
-    records.find((record) => record.id === selectedRecordId) || null;
+    filteredRecords.find((record) => record.id === selectedRecordId) || null;
 
   const approvedCount = useMemo(
     () => records.filter((item) => item.status === "Approved").length,
@@ -95,6 +152,7 @@ export function EvidenceSearchPage() {
   );
 
   function handleSearch() {
+    setCurrentPage(1);
     loadEvidence({
       plateNumber,
       intersection,
@@ -110,6 +168,7 @@ export function EvidenceSearchPage() {
     setDateFrom("");
     setDateTo("");
     setStatusFilter("All");
+    setCurrentPage(1);
     loadEvidence({});
   }
 
@@ -124,57 +183,57 @@ export function EvidenceSearchPage() {
   }
 
   async function handleExportSelected() {
-  if (!selectedRecord) return;
-
-  const assetUrl =
-    buildBackendAssetUrl(selectedRecord.videoUrl) ||
-    buildBackendAssetUrl(selectedRecord.imageUrl);
-
-  if (!assetUrl) {
-    alert("No downloadable evidence file is available for this record yet.");
-    return;
-  }
-
-  try {
-    await logEvidenceAccess(
-      selectedRecord.id,
-      "Exported",
-      `Evidence exported for ${selectedRecord.id}`
-    );
-  } catch (err) {
-    console.error("Failed to log evidence export:", err);
-  }
-
-  const link = document.createElement("a");
-  link.href = assetUrl;
-  link.download = `${selectedRecord.id}_${selectedRecord.evidenceType.toLowerCase()}`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-}
-
-const previewVideoUrl = buildBackendAssetUrl(selectedRecord?.videoUrl);
-const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
-
-  useEffect(() => {
-  async function logView() {
     if (!selectedRecord) return;
-    if (viewedRecordIdsRef.current.has(selectedRecord.id)) return;
+
+    const assetUrl =
+      buildBackendAssetUrl(selectedRecord.videoUrl) ||
+      buildBackendAssetUrl(selectedRecord.imageUrl);
+
+    if (!assetUrl) {
+      alert("No downloadable evidence file is available for this record yet.");
+      return;
+    }
 
     try {
       await logEvidenceAccess(
         selectedRecord.id,
-        "Viewed",
-        `Evidence preview opened for ${selectedRecord.id}`
+        "Exported",
+        `Evidence exported for ${selectedRecord.id}`
       );
-      viewedRecordIdsRef.current.add(selectedRecord.id);
     } catch (err) {
-      console.error("Failed to log evidence view:", err);
+      console.error("Failed to log evidence export:", err);
     }
+
+    const link = document.createElement("a");
+    link.href = assetUrl;
+    link.download = `${selectedRecord.id}_${selectedRecord.evidenceType.toLowerCase()}`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }
 
-  logView();
-}, [selectedRecord]);
+  const previewVideoUrl = buildBackendAssetUrl(selectedRecord?.videoUrl);
+  const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
+
+  useEffect(() => {
+    async function logView() {
+      if (!selectedRecord) return;
+      if (viewedRecordIdsRef.current.has(selectedRecord.id)) return;
+
+      try {
+        await logEvidenceAccess(
+          selectedRecord.id,
+          "Viewed",
+          `Evidence preview opened for ${selectedRecord.id}`
+        );
+        viewedRecordIdsRef.current.add(selectedRecord.id);
+      } catch (err) {
+        console.error("Failed to log evidence view:", err);
+      }
+    }
+
+    logView();
+  }, [selectedRecord]);
 
   return (
     <div className="space-y-8">
@@ -192,7 +251,9 @@ const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
 
         <div className="flex items-center gap-3">
           <button
-            onClick={() => loadEvidence({ plateNumber, intersection, dateFrom, dateTo, status: statusFilter })}
+            onClick={() =>
+              loadEvidence({ plateNumber, intersection, dateFrom, dateTo, status: statusFilter })
+            }
             className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
           >
             <RefreshCw className="h-4 w-4" />
@@ -246,7 +307,7 @@ const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
           </p>
         </div>
 
-        <div className="p-6 space-y-5">
+        <div className="space-y-5 p-6">
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
             <div>
               <label className="mb-2 block text-sm font-medium text-gray-700">
@@ -356,13 +417,13 @@ const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
               </p>
             </div>
             <div className="text-sm font-medium text-gray-500">
-              {loading ? "..." : `${records.length} result${records.length === 1 ? "" : "s"}`}
+              {loading ? "..." : `${filteredRecords.length} result${filteredRecords.length === 1 ? "" : "s"}`}
             </div>
           </div>
 
           {loading ? (
             <div className="px-6 py-12 text-sm text-gray-500">Loading evidence records...</div>
-          ) : records.length === 0 ? (
+          ) : filteredRecords.length === 0 ? (
             <div className="px-6 py-12">
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
                 <p className="text-base font-medium text-gray-900">No evidence records found</p>
@@ -372,65 +433,77 @@ const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
               </div>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full">
-                <thead className="border-b border-gray-200 bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Plate Number
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Intersection
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Date
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      View
-                    </th>
-                  </tr>
-                </thead>
+            <>
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalItems={filteredRecords.length}
+                itemsPerPage={ITEMS_PER_PAGE}
+                label="records"
+                onPrevious={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                onNext={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+              />
 
-                <tbody className="divide-y divide-gray-200 bg-white">
-                  {records.map((record) => {
-                    const isSelected = selectedRecordId === record.id;
+              <div className="overflow-x-auto">
+                <table className="min-w-full">
+                  <thead className="border-b border-gray-200 bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        ID
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Plate Number
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Intersection
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Date
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Status
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        View
+                      </th>
+                    </tr>
+                  </thead>
 
-                    return (
-                      <tr
-                        key={record.id}
-                        onClick={() => setSelectedRecordId(record.id)}
-                        className={`cursor-pointer transition ${
-                          isSelected ? "bg-gray-50" : "hover:bg-gray-50"
-                        }`}
-                      >
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{record.id}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{record.plateNumber}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{record.intersection}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{record.date}</td>
-                        <td className="px-6 py-4 text-sm">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                              record.status
-                            )}`}
-                          >
-                            {record.status}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-sm text-gray-500">
-                          <Eye className="h-4 w-4" />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                  <tbody className="divide-y divide-gray-200 bg-white">
+                    {paginatedRecords.map((record) => {
+                      const isSelected = selectedRecordId === record.id;
+
+                      return (
+                        <tr
+                          key={record.id}
+                          onClick={() => setSelectedRecordId(record.id)}
+                          className={`cursor-pointer transition ${
+                            isSelected ? "bg-gray-50" : "hover:bg-gray-50"
+                          }`}
+                        >
+                          <td className="px-6 py-4 text-sm font-medium text-gray-900">{record.id}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{record.plateNumber}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{record.intersection}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{record.date}</td>
+                          <td className="px-6 py-4 text-sm">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
+                                record.status
+                              )}`}
+                            >
+                              {record.status}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-500">
+                            <Eye className="h-4 w-4" />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
 
           <div className="border-t border-gray-200 px-6 py-4 flex justify-end">
@@ -545,28 +618,28 @@ const previewImageUrl = buildBackendAssetUrl(selectedRecord?.imageUrl);
                 </div>
 
                 {previewVideoUrl ? (
-                    <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
-                        <video
-                        src={previewVideoUrl}
-                        controls
-                        className="h-64 w-full bg-black object-contain"
-                        />
-                    </div>
-                    ) : previewImageUrl ? (
-                    <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
-                        <img
-                        src={previewImageUrl}
-                        alt={`Evidence for ${selectedRecord.id}`}
-                        className="h-64 w-full object-contain bg-gray-100"
-                        />
-                    </div>
-                    ) : (
-                    <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
-                        <p className="text-sm text-gray-600">
-                        No preview file is currently available for this record.
-                        </p>
-                    </div>
-                    )}
+                  <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
+                    <video
+                      src={previewVideoUrl}
+                      controls
+                      className="h-64 w-full bg-black object-contain"
+                    />
+                  </div>
+                ) : previewImageUrl ? (
+                  <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
+                    <img
+                      src={previewImageUrl}
+                      alt={`Evidence for ${selectedRecord.id}`}
+                      className="h-64 w-full object-contain bg-gray-100"
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
+                    <p className="text-sm text-gray-600">
+                      No preview file is currently available for this record.
+                    </p>
+                  </div>
+                )}
 
                 <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
                   <p className="text-xs uppercase tracking-wide text-gray-500">Evidence Type</p>

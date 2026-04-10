@@ -1,4 +1,3 @@
-// src/pages/AuditTrailPage.tsx
 import { useEffect, useMemo, useState } from "react";
 import {
   History,
@@ -13,8 +12,10 @@ import {
   Clock3,
   FileText,
   RefreshCw,
+  MessageSquare,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
+import { PaginationControls } from "../components/PaginationControls";
 import { getAuditLog, type AuditEntry, type AuditSeverity } from "../services/auditTrail";
 
 type ActionFilter =
@@ -24,7 +25,12 @@ type ActionFilter =
   | "Evidence Accessed"
   | "Configuration Updated"
   | "System Sync"
-  | "Record Created";
+  | "Record Created"
+  | "SMS Notification Sent"
+  | "SMS Notification Failed"
+  | "SMS Notification Skipped";
+
+const ITEMS_PER_PAGE = 10;
 
 export function AuditTrailPage() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
@@ -34,6 +40,7 @@ export function AuditTrailPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [actionFilter, setActionFilter] = useState<ActionFilter>("All");
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
 
   async function loadAuditLog() {
     try {
@@ -43,9 +50,10 @@ export function AuditTrailPage() {
       const data = await getAuditLog();
       setEntries(data);
 
-      if (data.length > 0) {
-        setSelectedEntryId((prev) => prev ?? data[0].id);
-      }
+      setSelectedEntryId((prev) => {
+        const stillExists = prev && data.some((item) => item.id === prev);
+        return stillExists ? prev : data[0]?.id ?? null;
+      });
     } catch (err) {
       console.error("Failed to load audit log:", err);
       setError("Failed to load audit trail from backend.");
@@ -64,7 +72,9 @@ export function AuditTrailPage() {
         entry.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
         entry.actor.toLowerCase().includes(searchTerm.toLowerCase()) ||
         entry.target.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        entry.summary.toLowerCase().includes(searchTerm.toLowerCase());
+        entry.summary.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        entry.actionType.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        entry.timestamp.toLowerCase().includes(searchTerm.toLowerCase());
 
       const matchesAction =
         actionFilter === "All" ? true : entry.actionType === actionFilter;
@@ -72,6 +82,38 @@ export function AuditTrailPage() {
       return matchesSearch && matchesAction;
     });
   }, [entries, searchTerm, actionFilter]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, actionFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredEntries.length / ITEMS_PER_PAGE));
+
+  useEffect(() => {
+    if (currentPage > totalPages) {
+      setCurrentPage(totalPages);
+    }
+  }, [currentPage, totalPages]);
+
+  const paginatedEntries = useMemo(() => {
+    const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+    return filteredEntries.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+  }, [filteredEntries, currentPage]);
+
+  useEffect(() => {
+    if (filteredEntries.length === 0) {
+      setSelectedEntryId(null);
+      return;
+    }
+
+    const selectedStillExists = selectedEntryId
+      ? filteredEntries.some((entry) => entry.id === selectedEntryId)
+      : false;
+
+    if (!selectedStillExists) {
+      setSelectedEntryId(filteredEntries[0].id);
+    }
+  }, [filteredEntries, selectedEntryId]);
 
   const selectedEntry =
     filteredEntries.find((entry) => entry.id === selectedEntryId) ||
@@ -104,8 +146,15 @@ export function AuditTrailPage() {
     if (actionType === "Configuration Updated") {
       return <Settings className="h-4 w-4 text-gray-700" />;
     }
-    if (actionType === "System Sync") {
+    if (actionType === "System Sync" || actionType === "Record Created") {
       return <Database className="h-4 w-4 text-gray-700" />;
+    }
+    if (
+      actionType === "SMS Notification Sent" ||
+      actionType === "SMS Notification Failed" ||
+      actionType === "SMS Notification Skipped"
+    ) {
+      return <MessageSquare className="h-4 w-4 text-gray-700" />;
     }
     return <ShieldCheck className="h-4 w-4 text-gray-700" />;
   }
@@ -191,7 +240,7 @@ export function AuditTrailPage() {
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Audit Events</h2>
                 <p className="mt-1 text-sm text-gray-600">
-                  Search and filter logged system activity.
+                  Search, filter, and browse logged system activity.
                 </p>
               </div>
 
@@ -200,7 +249,7 @@ export function AuditTrailPage() {
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
                   <input
                     type="text"
-                    placeholder="Search by ID, actor, target, or summary"
+                    placeholder="Search by ID, actor, target, action, or summary"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-full rounded-lg border border-gray-300 bg-white py-2 pl-10 pr-4 text-sm text-gray-900 outline-none transition focus:border-gray-400 md:w-80"
@@ -212,7 +261,7 @@ export function AuditTrailPage() {
                   <select
                     value={actionFilter}
                     onChange={(e) => setActionFilter(e.target.value as ActionFilter)}
-                    className="w-full appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-10 pr-8 text-sm text-gray-900 outline-none transition focus:border-gray-400 md:w-56"
+                    className="w-full appearance-none rounded-lg border border-gray-300 bg-white py-2 pl-10 pr-8 text-sm text-gray-900 outline-none transition focus:border-gray-400 md:w-64"
                   >
                     <option value="All">All Actions</option>
                     <option value="Review Approved">Review Approved</option>
@@ -221,6 +270,9 @@ export function AuditTrailPage() {
                     <option value="Configuration Updated">Configuration Updated</option>
                     <option value="System Sync">System Sync</option>
                     <option value="Record Created">Record Created</option>
+                    <option value="SMS Notification Sent">SMS Notification Sent</option>
+                    <option value="SMS Notification Failed">SMS Notification Failed</option>
+                    <option value="SMS Notification Skipped">SMS Notification Skipped</option>
                   </select>
                 </div>
               </div>
@@ -232,70 +284,85 @@ export function AuditTrailPage() {
           ) : filteredEntries.length === 0 ? (
             <div className="px-6 py-12">
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
-                <p className="text-base font-medium text-gray-900">No audit events found</p>
+                <History className="mx-auto h-8 w-8 text-gray-400" />
+                <p className="mt-3 text-base font-medium text-gray-900">No audit events found</p>
                 <p className="mt-2 text-sm text-gray-600">
                   Try adjusting the search text or action filter.
                 </p>
               </div>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="min-w-full">
-                <thead className="border-b border-gray-200 bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Event ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Timestamp
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Actor
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Action
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Target
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                      Severity
-                    </th>
-                  </tr>
-                </thead>
+            <>
+              <PaginationControls
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalItems={filteredEntries.length}
+                itemsPerPage={ITEMS_PER_PAGE}
+                label="events"
+                onPrevious={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                onNext={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+              />
 
-                <tbody className="divide-y divide-gray-200 bg-white">
-                  {filteredEntries.map((entry) => {
-                    const isSelected = entry.id === selectedEntryId;
+              <div className="overflow-x-auto">
+                <table className="min-w-full">
+                  <thead className="border-b border-gray-200 bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Event ID
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Timestamp
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Actor
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Action
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Target
+                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
+                        Severity
+                      </th>
+                    </tr>
+                  </thead>
 
-                    return (
-                      <tr
-                        key={entry.id}
-                        onClick={() => setSelectedEntryId(entry.id)}
-                        className={`cursor-pointer transition ${
-                          isSelected ? "bg-gray-50" : "hover:bg-gray-50"
-                        }`}
-                      >
-                        <td className="px-6 py-4 text-sm font-medium text-gray-900">{entry.id}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{entry.timestamp}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{entry.actor}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{entry.actionType}</td>
-                        <td className="px-6 py-4 text-sm text-gray-900">{entry.target}</td>
-                        <td className="px-6 py-4 text-sm">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getSeverityClasses(
-                              entry.severity
-                            )}`}
-                          >
-                            {entry.severity}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
+                  <tbody className="divide-y divide-gray-200 bg-white">
+                    {paginatedEntries.map((entry) => {
+                      const isSelected = entry.id === selectedEntryId;
+
+                      return (
+                        <tr
+                          key={entry.id}
+                          onClick={() => setSelectedEntryId(entry.id)}
+                          className={`cursor-pointer transition ${
+                            isSelected ? "bg-gray-50" : "hover:bg-gray-50"
+                          }`}
+                        >
+                          <td className="px-6 py-4 text-sm font-medium text-gray-900">
+                            {entry.id}
+                          </td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{entry.timestamp}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{entry.actor}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{entry.actionType}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">{entry.target}</td>
+                          <td className="px-6 py-4 text-sm">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getSeverityClasses(
+                                entry.severity
+                              )}`}
+                            >
+                              {entry.severity}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
 
@@ -322,7 +389,9 @@ export function AuditTrailPage() {
                     <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
                       Selected Event
                     </p>
-                    <p className="mt-1 text-lg font-semibold text-gray-900">{selectedEntry.id}</p>
+                    <p className="mt-1 text-lg font-semibold text-gray-900">
+                      {selectedEntry.id}
+                    </p>
                   </div>
                   <span
                     className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getSeverityClasses(
@@ -407,67 +476,14 @@ export function AuditTrailPage() {
               </div>
 
               <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-                <p className="text-sm font-semibold text-blue-900">Why this matters</p>
+                <p className="text-sm font-semibold text-blue-900">Current status</p>
                 <p className="mt-2 text-sm text-blue-800">
-                  Audit logging supports transparency, legal defensibility, reviewer accountability,
-                  and controlled access to sensitive system actions.
+                  This page shows live backend audit events with search, filtering, and paginated browsing.
                 </p>
               </div>
             </div>
           )}
         </div>
-      </section>
-
-      <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-          <div className="flex items-start gap-3">
-            <div className="rounded-lg bg-gray-100 p-2">
-              <History className="h-5 w-5 text-gray-700" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Traceability</h2>
-              <p className="mt-1 text-sm text-gray-600">
-                Important system decisions and user actions are visible and reviewable.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-          <div className="flex items-start gap-3">
-            <div className="rounded-lg bg-gray-100 p-2">
-              <ShieldCheck className="h-5 w-5 text-gray-700" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Accountability</h2>
-              <p className="mt-1 text-sm text-gray-600">
-                Sensitive actions can be linked back to a user or a system process.
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
-          <div className="flex items-start gap-3">
-            <div className="rounded-lg bg-gray-100 p-2">
-              <Database className="h-5 w-5 text-gray-700" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-gray-900">Live Backend Linkage</h2>
-              <p className="mt-1 text-sm text-gray-600">
-                This page now reflects backend audit records from review, config, evidence, and sync workflows.
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section className="rounded-xl border border-blue-200 bg-blue-50 p-5">
-        <h2 className="text-sm font-semibold text-blue-900">Current status</h2>
-        <p className="mt-2 text-sm text-blue-800">
-          This page now loads real audit records from the backend. Review actions and configuration
-          updates should appear here as soon as they are logged by backend workflows.
-        </p>
       </section>
     </div>
   );
