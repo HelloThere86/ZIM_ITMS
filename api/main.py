@@ -32,28 +32,38 @@ class ReviewDecisionRequest(BaseModel):
     decision: str  # Approved | Rejected
     reviewerUserId: Optional[int] = None
     note: Optional[str] = None
+    correctedPlateNumber: Optional[str] = None
 
 
 class ConfigUpdateRequest(BaseModel):
     configValue: str
     updatedBy: Optional[int] = None
     note: Optional[str] = None
-    
+
+
 class EvidenceAccessRequest(BaseModel):
     action: str  # Viewed | Exported
     userId: Optional[int] = None
     note: Optional[str] = None
-    
+
+
 class SendSmsRequest(BaseModel):
     userId: Optional[int] = None
     note: Optional[str] = None
-    
+
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
+
+def normalize_plate(plate: Optional[str]) -> Optional[str]:
+    if not plate:
+        return None
+    cleaned = "".join(ch for ch in plate.upper() if ch.isalnum())
+    return cleaned or None
 
 
 def parse_violation_id(violation_code: str) -> int:
@@ -157,7 +167,7 @@ def load_traffic_results():
     models = raw.get("models", {})
 
     fixed = models.get("fixed_timer", {})
-    best = models.get("coop_dqn", {})  # use best learned model for dashboard summary
+    best = models.get("coop_dqn", {})
 
     baseline_wait = fixed.get("avgWaitPerStep")
     best_wait = best.get("avgWaitPerStep")
@@ -340,12 +350,14 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
         raise HTTPException(status_code=400, detail="Decision must be 'Approved' or 'Rejected'")
 
     violation_id = parse_violation_id(violation_code)
+    corrected_plate = normalize_plate(payload.correctedPlateNumber)
+
     conn = get_db()
     c = conn.cursor()
 
     c.execute(
         """
-        SELECT violation_id, status, reviewer_user_id, reviewed_at, review_note
+        SELECT violation_id, plate_number, status, reviewer_user_id, reviewed_at, review_note
         FROM violation
         WHERE violation_id = ?
         """,
@@ -357,7 +369,25 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
         conn.close()
         raise HTTPException(status_code=404, detail="Violation not found")
 
+    final_plate = existing["plate_number"]
+
+    if payload.decision == "Approved" and corrected_plate:
+        plate_exists = c.execute(
+            "SELECT 1 FROM vehicle WHERE plate_number = ? LIMIT 1",
+            (corrected_plate,),
+        ).fetchone()
+
+        if not plate_exists:
+            conn.close()
+            raise HTTPException(
+                status_code=400,
+                detail=f"Corrected plate {corrected_plate} is not in the vehicle registry",
+            )
+
+        final_plate = corrected_plate
+
     old_state = {
+        "plate_number": existing["plate_number"],
         "status": existing["status"],
         "reviewer_user_id": existing["reviewer_user_id"],
         "reviewed_at": existing["reviewed_at"],
@@ -366,36 +396,62 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
 
     reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    existing_note = existing["review_note"] or ""
+    officer_note = payload.note or ""
+
+    if corrected_plate and payload.decision == "Approved":
+        officer_note = (
+            f"{officer_note} | Officer confirmed plate: {corrected_plate}"
+            if officer_note
+            else f"Officer confirmed plate: {corrected_plate}"
+        )
+
+    updated_note = existing_note
+    if officer_note:
+        updated_note = f"{existing_note} [OFFICER_REVIEW={officer_note}]" if existing_note else officer_note
+
     c.execute(
         """
         UPDATE violation
-        SET status = ?, reviewer_user_id = ?, reviewed_at = ?, review_note = ?
+        SET status = ?,
+            decision_type = 'Flagged',
+            plate_number = ?,
+            reviewer_user_id = ?,
+            reviewed_at = ?,
+            review_note = ?
         WHERE violation_id = ?
         """,
         (
             payload.decision,
+            final_plate,
             payload.reviewerUserId,
             reviewed_at,
-            payload.note,
+            updated_note,
             violation_id,
         ),
-        
-    ) 
-    
+    )
+
     sms_result = None
     if payload.decision == "Approved":
-        sms_result = process_sms_for_violation(
-            conn=conn,
-            violation_id=violation_id,
-            user_id=payload.reviewerUserId,
-            note="Automatic SMS after human approval",
-        )  
+        try:
+            sms_result = process_sms_for_violation(
+                conn=conn,
+                violation_id=violation_id,
+                user_id=payload.reviewerUserId,
+                note="Automatic SMS after human approval",
+            )
+        except Exception as sms_err:
+            sms_result = {
+                "status": "Failed",
+                "error": str(sms_err),
+            }
 
     new_state = {
+        "plate_number": final_plate,
         "status": payload.decision,
         "reviewer_user_id": payload.reviewerUserId,
         "reviewed_at": reviewed_at,
-        "review_note": payload.note,
+        "review_note": updated_note,
     }
 
     write_audit_log(
@@ -406,7 +462,7 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
         entity_id=f"V-{violation_id}",
         old_value=old_state,
         new_value=new_state,
-        note=payload.note or f"Violation marked as {payload.decision}",
+        note=officer_note or f"Violation marked as {payload.decision}",
     )
 
     conn.commit()
@@ -415,6 +471,7 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
     return {
         "message": f"Violation V-{violation_id} updated successfully",
         "status": payload.decision,
+        "plateNumber": final_plate,
         "smsResult": sms_result,
     }
 
@@ -495,6 +552,7 @@ def get_evidence_search(
 
     return records
 
+
 @app.post("/api/evidence-search/{violation_code}/access")
 def log_evidence_access(violation_code: str, payload: EvidenceAccessRequest):
     if payload.action not in ["Viewed", "Exported"]:
@@ -543,22 +601,27 @@ def log_evidence_access(violation_code: str, payload: EvidenceAccessRequest):
         "message": f"Evidence access logged for V-{violation_id}",
         "action": payload.action,
     }
-    
+
+
 @app.get("/api/violations/{violation_id}/sms")
 def get_sms_log(violation_id: int):
     conn = get_db()
     c = conn.cursor()
-    c.execute("""
-        SELECT status, message_text, recipient_phone, sent_at, error_message 
-        FROM notification_log 
-        WHERE violation_id = ? 
+    c.execute(
+        """
+        SELECT status, message_text, recipient_phone, sent_at, error_message
+        FROM notification_log
+        WHERE violation_id = ?
         ORDER BY notification_id DESC LIMIT 1
-    """, (violation_id,))
+        """,
+        (violation_id,),
+    )
     row = c.fetchone()
     conn.close()
-    
-    if row: return dict(row)
-    else: return {"status": "None", "message_text": "No SMS generated yet."}
+
+    if row:
+        return dict(row)
+    return {"status": "None", "message_text": "No SMS generated yet."}
 
 
 @app.post("/api/violations/{violation_code}/send-sms")
@@ -581,7 +644,8 @@ def send_violation_sms(violation_code: str, payload: SendSmsRequest):
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
     finally:
         conn.close()
-        
+
+
 @app.get("/api/notifications/sms")
 def get_sms_notifications():
     conn = get_db()
@@ -624,6 +688,7 @@ def get_sms_notifications():
         }
         for row in rows
     ]
+
 
 @app.get("/api/audit-log")
 def get_audit_log():
@@ -772,6 +837,7 @@ def update_config(config_key: str, payload: ConfigUpdateRequest):
     conn.close()
 
     return {"message": f"Configuration '{config_key}' updated successfully"}
+
 
 @app.get("/api/fines")
 def get_fines():

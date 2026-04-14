@@ -20,6 +20,7 @@ export interface ReviewCase {
 interface ReviewDecisionResponse {
   message: string;
   status: ReviewStatus;
+  plateNumber?: string;
 }
 
 export function getReviewQueue(): Promise<ReviewCase[]> {
@@ -28,11 +29,15 @@ export function getReviewQueue(): Promise<ReviewCase[]> {
 
 export function submitReviewDecision(
   violationId: string,
-  decision: "Approved" | "Rejected"
+  decision: "Approved" | "Rejected",
+  correctedPlateNumber?: string | null
 ): Promise<ReviewDecisionResponse> {
   return postJson<ReviewDecisionResponse>(`/review-queue/${violationId}/decision`, {
     decision,
     reviewerUserId: null,
-    note: "",
+    note: correctedPlateNumber
+      ? `Officer selected/corrected plate: ${correctedPlateNumber}`
+      : "",
+    correctedPlateNumber: correctedPlateNumber || null,
   });
 }

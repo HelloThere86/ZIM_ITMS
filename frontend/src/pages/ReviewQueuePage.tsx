@@ -16,6 +16,7 @@ import {
   Database,
   ShieldCheck,
   WifiOff,
+  PencilLine,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
 import { PaginationControls } from "../components/PaginationControls";
@@ -70,6 +71,10 @@ function parseReviewData(notes?: string | null): ReviewData | null {
   }
 }
 
+function cleanPlateInput(value: string): string {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
+}
+
 export function ReviewQueuePage() {
   const [cases, setCases] = useState<ReviewCase[]>([]);
   const [loading, setLoading] = useState(true);
@@ -80,6 +85,9 @@ export function ReviewQueuePage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+
+  const [selectedPlateOverride, setSelectedPlateOverride] = useState<string | null>(null);
+  const [manualPlateInput, setManualPlateInput] = useState("");
 
   async function loadCases() {
     try {
@@ -108,6 +116,7 @@ export function ReviewQueuePage() {
   const filteredCases = useMemo(() => {
     return cases.filter((item) => {
       const reviewData = parseReviewData(item.notes);
+
       const searchableReviewText = [
         reviewData?.ocrPlate,
         reviewData?.registryStatus,
@@ -172,6 +181,11 @@ export function ReviewQueuePage() {
 
   const selectedReviewData = parseReviewData(selectedCase?.notes);
 
+  useEffect(() => {
+    setSelectedPlateOverride(null);
+    setManualPlateInput("");
+  }, [selectedCaseId]);
+
   const pendingCount = cases.filter((item) => item.reviewStatus === "Pending").length;
   const approvedCount = cases.filter((item) => item.reviewStatus === "Approved").length;
   const rejectedCount = cases.filter((item) => item.reviewStatus === "Rejected").length;
@@ -179,33 +193,24 @@ export function ReviewQueuePage() {
   const imageUrl = buildBackendAssetUrl(selectedCase?.imageUrl ?? null);
   const videoUrl = buildBackendAssetUrl(selectedCase?.videoUrl ?? null);
 
+  const finalSelectedPlate =
+    selectedPlateOverride || cleanPlateInput(manualPlateInput) || null;
+
   function getStatusClasses(status: ReviewStatus) {
-    if (status === "Pending") {
-      return "bg-yellow-100 text-yellow-800 border border-yellow-200";
-    }
-    if (status === "Approved") {
-      return "bg-green-100 text-green-800 border border-green-200";
-    }
+    if (status === "Pending") return "bg-yellow-100 text-yellow-800 border border-yellow-200";
+    if (status === "Approved") return "bg-green-100 text-green-800 border border-green-200";
     return "bg-red-100 text-red-800 border border-red-200";
   }
 
   function getConfidenceClasses(level: ConfidenceLevel) {
-    if (level === "High") {
-      return "bg-green-100 text-green-800 border border-green-200";
-    }
-    if (level === "Medium") {
-      return "bg-yellow-100 text-yellow-800 border border-yellow-200";
-    }
+    if (level === "High") return "bg-green-100 text-green-800 border border-green-200";
+    if (level === "Medium") return "bg-yellow-100 text-yellow-800 border border-yellow-200";
     return "bg-red-100 text-red-800 border border-red-200";
   }
 
   function getRegistryStatusClasses(status?: string) {
-    if (status === "ExactMatch") {
-      return "bg-green-100 text-green-800 border border-green-200";
-    }
-    if (status === "PendingSync") {
-      return "bg-blue-100 text-blue-800 border border-blue-200";
-    }
+    if (status === "ExactMatch") return "bg-green-100 text-green-800 border border-green-200";
+    if (status === "PendingSync") return "bg-blue-100 text-blue-800 border border-blue-200";
     if (status === "NoExactMatch" || status === "PlateNotLocked") {
       return "bg-yellow-100 text-yellow-800 border border-yellow-200";
     }
@@ -219,7 +224,10 @@ export function ReviewQueuePage() {
       setSaving(true);
       setError(null);
 
-      await submitReviewDecision(selectedCase.id, nextStatus);
+      const correctedPlate =
+        nextStatus === "Approved" && finalSelectedPlate ? finalSelectedPlate : null;
+
+      await submitReviewDecision(selectedCase.id, nextStatus, correctedPlate);
 
       setCases((prev) =>
         prev.map((item) =>
@@ -227,6 +235,7 @@ export function ReviewQueuePage() {
             ? {
                 ...item,
                 reviewStatus: nextStatus,
+                plateNumber: correctedPlate ?? item.plateNumber,
               }
             : item
         )
@@ -248,8 +257,8 @@ export function ReviewQueuePage() {
             Review Queue
           </h1>
           <p className="mt-3 max-w-3xl text-sm text-gray-600">
-            This page supports semi-automated enforcement by routing uncertain, offline,
-            or low-confidence ANPR cases to a reviewer before final action is taken.
+            This page routes uncertain, offline, or low-confidence ANPR cases to an
+            officer before final enforcement action is taken.
           </p>
         </div>
 
@@ -319,7 +328,7 @@ export function ReviewQueuePage() {
             <div className="px-6 py-12">
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
                 <p className="text-base font-medium text-gray-900">No matching review cases found</p>
-                <p className="mt-2 text-sm text-gray-600">Adjust the search or filter to see more results.</p>
+                <p className="mt-2 text-sm text-gray-600">Adjust the search or filter.</p>
               </div>
             </div>
           ) : (
@@ -361,7 +370,9 @@ export function ReviewQueuePage() {
                           <td className="px-6 py-4 text-sm text-gray-900">
                             <div className="font-medium">{item.plateNumber}</div>
                             {rowReviewData?.ocrPlate && (
-                              <div className="mt-1 text-xs text-gray-500">OCR: {rowReviewData.ocrPlate}</div>
+                              <div className="mt-1 text-xs text-gray-500">
+                                OCR: {rowReviewData.ocrPlate}
+                              </div>
                             )}
                           </td>
                           <td className="px-6 py-4 text-sm text-gray-900">{item.intersection}</td>
@@ -396,7 +407,7 @@ export function ReviewQueuePage() {
           {!selectedCase ? (
             <div className="mt-6 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
               <p className="text-sm font-medium text-gray-900">No case selected</p>
-              <p className="mt-2 text-sm text-gray-600">Select a case from the queue to inspect and act on it.</p>
+              <p className="mt-2 text-sm text-gray-600">Select a case from the queue.</p>
             </div>
           ) : (
             <div className="mt-6 space-y-5">
@@ -460,24 +471,39 @@ export function ReviewQueuePage() {
                 {selectedReviewData?.similarRegisteredPlates?.length ? (
                   <div className="mt-4">
                     <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
-                      Suggested Registered Matches
+                      Select Actual Plate From Suggestions
                     </p>
 
                     <div className="mt-2 space-y-2">
-                      {selectedReviewData.similarRegisteredPlates.map((match) => (
-                        <div
-                          key={match.plate}
-                          className="flex items-center justify-between rounded-lg border border-blue-100 bg-white px-3 py-2 text-sm"
-                        >
-                          <div>
-                            <p className="font-semibold text-gray-900">{match.plate}</p>
-                            <p className="text-xs text-gray-500">{match.format}</p>
-                          </div>
-                          <p className="text-xs text-gray-500">
-                            Score {match.score} · Distance {match.distance}
-                          </p>
-                        </div>
-                      ))}
+                      {selectedReviewData.similarRegisteredPlates.map((match) => {
+                        const selected = selectedPlateOverride === match.plate;
+
+                        return (
+                          <button
+                            type="button"
+                            key={match.plate}
+                            onClick={() => {
+                              setSelectedPlateOverride(match.plate);
+                              setManualPlateInput("");
+                            }}
+                            className={`w-full rounded-lg border px-3 py-2 text-left text-sm transition ${
+                              selected
+                                ? "border-green-500 bg-green-50"
+                                : "border-blue-100 bg-white hover:border-blue-300"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <div>
+                                <p className="font-semibold text-gray-900">{match.plate}</p>
+                                <p className="text-xs text-gray-500">{match.format}</p>
+                              </div>
+                              <p className="text-xs text-gray-500">
+                                Score {match.score} · Distance {match.distance}
+                              </p>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 ) : (
@@ -485,6 +511,31 @@ export function ReviewQueuePage() {
                     No similar registered plates were found for this case.
                   </p>
                 )}
+
+                <div className="mt-4 rounded-lg border border-blue-100 bg-white p-3">
+                  <div className="flex items-center gap-2">
+                    <PencilLine className="h-4 w-4 text-gray-600" />
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-600">
+                      Manual Plate Correction
+                    </p>
+                  </div>
+
+                  <input
+                    value={manualPlateInput}
+                    onChange={(e) => {
+                      setManualPlateInput(cleanPlateInput(e.target.value));
+                      setSelectedPlateOverride(null);
+                    }}
+                    placeholder="Type actual plate if visible"
+                    className="mt-2 w-full rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium uppercase text-gray-900 outline-none focus:border-gray-500"
+                  />
+
+                  {finalSelectedPlate && (
+                    <p className="mt-2 text-xs text-green-700">
+                      Approval will store plate as: <span className="font-semibold">{finalSelectedPlate}</span>
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-3">
@@ -526,7 +577,7 @@ export function ReviewQueuePage() {
                   <FileText className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
                     <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Detection Notes</p>
-                    <p className="text-sm font-medium text-gray-900">{selectedCase.notes}</p>
+                    <p className="break-words text-sm font-medium text-gray-900">{selectedCase.notes}</p>
                   </div>
                 </div>
 
@@ -571,7 +622,7 @@ export function ReviewQueuePage() {
                   className="inline-flex items-center justify-center gap-2 rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm font-medium text-green-800 transition hover:bg-green-100 disabled:opacity-50"
                 >
                   <CheckCircle2 className="h-4 w-4" />
-                  {saving ? "Saving..." : "Approve Case"}
+                  {saving ? "Saving..." : finalSelectedPlate ? `Approve as ${finalSelectedPlate}` : "Approve Case"}
                 </button>
 
                 <button
@@ -590,7 +641,7 @@ export function ReviewQueuePage() {
                   <div>
                     <p className="text-sm font-semibold text-green-900">Human-in-the-loop safeguard</p>
                     <p className="mt-1 text-sm text-green-800">
-                      Officers can use the evidence and suggested registry matches before approving or rejecting the case.
+                      Officers can inspect evidence, select a suggested plate, or manually correct the plate before approving.
                     </p>
                   </div>
                 </div>
@@ -610,23 +661,6 @@ export function ReviewQueuePage() {
             <p className="mt-1 text-sm text-gray-600">
               This page supports transparency, fairness, and auditability in the enforcement workflow.
             </p>
-          </div>
-        </div>
-
-        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
-          <div className="rounded-lg border border-gray-200 p-4">
-            <p className="text-sm font-medium text-gray-900">Human Oversight</p>
-            <p className="mt-2 text-sm text-gray-600">Low-confidence cases are not enforced blindly.</p>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 p-4">
-            <p className="text-sm font-medium text-gray-900">Offline-First Operation</p>
-            <p className="mt-2 text-sm text-gray-600">Edge nodes can store evidence before registry connectivity returns.</p>
-          </div>
-
-          <div className="rounded-lg border border-gray-200 p-4">
-            <p className="text-sm font-medium text-gray-900">Audit Readiness</p>
-            <p className="mt-2 text-sm text-gray-600">Each review decision is captured for traceability.</p>
           </div>
         </div>
       </section>
