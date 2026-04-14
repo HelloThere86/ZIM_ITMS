@@ -111,6 +111,32 @@ export function Dashboard() {
     return "bg-green-100 text-green-700 border-green-200";
   }
 
+  function calculateImprovementPercent(trafficResults: TrafficResults | null): number | null {
+  if (!trafficResults) return null;
+
+  if (
+    typeof trafficResults.improvementPercent === "number" &&
+    Number.isFinite(trafficResults.improvementPercent)
+  ) {
+    return trafficResults.improvementPercent;
+  }
+
+  const baseline = trafficResults.models?.fixed_timer?.avgWaitPerStep;
+  const best = trafficResults.models?.coop_dqn?.avgWaitPerStep;
+
+  if (
+    typeof baseline !== "number" ||
+    typeof best !== "number" ||
+    !Number.isFinite(baseline) ||
+    !Number.isFinite(best) ||
+    baseline <= 0
+  ) {
+    return null;
+  }
+
+  return ((baseline - best) / baseline) * 100;
+}
+
   return (
     <div className="space-y-8">
       <section className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -179,13 +205,13 @@ export function Dashboard() {
           sublabel="Ineligible or duplicate notifications"
         />
         <StatCard
-          label="DQN Improvement"
+          label="Coop MARL Improvement"
           value={
             loading || !trafficResults
               ? "..."
-              : `${trafficResults.improvementPercent.toFixed(2)}%`
+              : `${trafficResults.improvementPercent != null ? trafficResults.improvementPercent.toFixed(2) : "-"}%`
           }
-          sublabel="Baseline vs DQN waiting time comparison"
+          sublabel="Baseline vs Coop MARL waiting time comparison"
         />
       </section>
 
@@ -355,7 +381,7 @@ export function Dashboard() {
               </div>
 
               <div className="rounded-lg border border-gray-200 px-4 py-4">
-                <p className="text-xs uppercase tracking-wide text-gray-500">DQN Wait</p>
+                <p className="text-xs uppercase tracking-wide text-gray-500">Coop MARL Wait</p>
                 <p className="mt-2 text-2xl font-semibold text-gray-900">
                   {trafficResults.dqnWaitingTime}
                 </p>
@@ -364,7 +390,7 @@ export function Dashboard() {
               <div className="rounded-lg border border-gray-200 px-4 py-4">
                 <p className="text-xs uppercase tracking-wide text-gray-500">Improvement</p>
                 <p className="mt-2 text-2xl font-semibold text-gray-900">
-                  {trafficResults.improvementPercent.toFixed(2)}%
+                  {trafficResults.improvementPercent != null ? `${trafficResults.improvementPercent.toFixed(2)}%` : "-"}
                 </p>
               </div>
             </div>

@@ -109,27 +109,77 @@ def build_case_reference(violation_id: int, timestamp: Optional[str]) -> str:
 
 def load_traffic_results():
     if not TRAFFIC_RESULTS_PATH.exists():
+        fallback_models = {
+            "fixed_timer": {
+                "avgWaitPerStep": 159.10,
+                "avgQueuePerStep": 17.12,
+                "throughput": 4225,
+                "runs": 5,
+            },
+            "individual_dqn": {
+                "avgWaitPerStep": 53.43,
+                "avgQueuePerStep": 10.39,
+                "throughput": 4222,
+                "runs": 5,
+            },
+            "coop_dqn": {
+                "avgWaitPerStep": 52.58,
+                "avgQueuePerStep": 10.49,
+                "throughput": 4232,
+                "runs": 5,
+            },
+            "qmix": {
+                "avgWaitPerStep": 109.63,
+                "avgQueuePerStep": 21.21,
+                "throughput": 4035,
+                "runs": 5,
+            },
+        }
+
+        baseline_wait = fallback_models["fixed_timer"]["avgWaitPerStep"]
+        best_wait = fallback_models["coop_dqn"]["avgWaitPerStep"]
+        improvement = ((baseline_wait - best_wait) / baseline_wait) * 100
+
         return {
-            "baselineWaitingTime": 120,
-            "dqnWaitingTime": 7,
-            "improvementPercent": 94,
-            "trainingEpisodes": 200,
-            "trainingRewards": [
-                {"episode": 1, "reward": 18},
-                {"episode": 25, "reward": 31},
-                {"episode": 50, "reward": 42},
-                {"episode": 75, "reward": 55},
-                {"episode": 100, "reward": 63},
-                {"episode": 125, "reward": 71},
-                {"episode": 150, "reward": 79},
-                {"episode": 175, "reward": 86},
-                {"episode": 200, "reward": 94},
-            ],
-            "notes": "Fallback demo values. Replace with exported DQN comparison results."
+            "models": fallback_models,
+            "baselineWaitingTime": baseline_wait,
+            "dqnWaitingTime": best_wait,
+            "improvementPercent": round(improvement, 2),
+            "bestModelKey": "coop_dqn",
+            "trainingEpisodes": 500,
+            "trainingRewards": [],
+            "notes": "Fallback demo values. Replace with exported comparison_results.json.",
         }
 
     with open(TRAFFIC_RESULTS_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        raw = json.load(f)
+
+    models = raw.get("models", {})
+
+    fixed = models.get("fixed_timer", {})
+    best = models.get("coop_dqn", {})  # use best learned model for dashboard summary
+
+    baseline_wait = fixed.get("avgWaitPerStep")
+    best_wait = best.get("avgWaitPerStep")
+
+    if baseline_wait is None or best_wait is None:
+        raise HTTPException(
+            status_code=500,
+            detail="comparison_results.json is missing avgWaitPerStep values for fixed_timer or coop_dqn",
+        )
+
+    improvement = ((baseline_wait - best_wait) / baseline_wait) * 100 if baseline_wait > 0 else 0.0
+
+    return {
+        "models": models,
+        "baselineWaitingTime": round(float(baseline_wait), 2),
+        "dqnWaitingTime": round(float(best_wait), 2),
+        "improvementPercent": round(float(improvement), 2),
+        "bestModelKey": "coop_dqn",
+        "trainingEpisodes": raw.get("trainingEpisodes", 500),
+        "trainingRewards": raw.get("trainingRewards", []),
+        "notes": raw.get("notes", ""),
+    }
 
 
 def write_audit_log(

@@ -20,16 +20,25 @@ export interface SmsNotification {
   sentAt: string | null;
 }
 
+export interface ModelResult {
+  avgWaitPerStep: number;
+  avgQueuePerStep: number;
+  throughput: number;
+  runs: number;
+}
+
 export interface TrafficResults {
-  baselineWaitingTime: number;
-  dqnWaitingTime: number;
-  improvementPercent: number;
-  trainingEpisodes: number;
-  trainingRewards: Array<{
+  models: Record<string, ModelResult>;
+  baselineWaitingTime?: number | null;
+  dqnWaitingTime?: number | null;
+  improvementPercent?: number | null;
+  bestModelKey?: string | null;
+  trainingEpisodes?: number | null;
+  trainingRewards?: Array<{
     episode: number;
     reward: number;
   }>;
-  notes?: string;
+  notes?: string | null;
 }
 
 export interface AuditEntry {
