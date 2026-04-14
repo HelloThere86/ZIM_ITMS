@@ -6,6 +6,7 @@ import os
 import sys
 import re
 import time
+import json
 import subprocess
 from datetime import datetime
 from collections import deque, defaultdict
@@ -40,6 +41,7 @@ except ImportError:
     SMS_AVAILABLE = False
 
 from api.runtime_config import get_runtime_config
+from api.plate_matcher import find_similar_registered_plates
 
 DEFAULT_INTERSECTION_ID = 1
 CNN_CLASSES = ["ambulance", "civilian_car", "fire_truck", "police_car"]
@@ -94,46 +96,29 @@ def is_exact_uk_plate(text: str) -> bool:
 
 def normalize_uk_candidate(raw: str) -> str | None:
     cleaned = normalize_plate(raw)
-    if not cleaned:
+    if not cleaned or len(cleaned) < 7:
         return None
 
-    candidates = []
-    if len(cleaned) >= 7:
-        for i in range(0, len(cleaned) - 6):
-            candidates.append(cleaned[i:i + 7])
-    else:
-        return None
+    candidates = [cleaned[i:i + 7] for i in range(0, len(cleaned) - 6)]
 
     digit_map = {
         "O": "0", "Q": "0", "D": "0",
         "I": "1", "L": "1", "T": "1",
-        "Z": "2",
-        "S": "5",
-        "B": "8",
-        "G": "6",
+        "Z": "2", "S": "5", "B": "8", "G": "6",
     }
 
     letter_map = {
-        "0": "O",
-        "1": "I",
-        "2": "Z",
-        "5": "S",
-        "6": "G",
-        "8": "B",
+        "0": "O", "1": "I", "2": "Z", "5": "S", "6": "G", "8": "B",
     }
 
     best = None
     best_score = -1e9
 
     for cand in candidates:
-        if len(cand) != 7:
-            continue
-
         chars = list(cand)
         score = 0.0
         valid = True
 
-        # UK format: AA00AAA
         for pos in [0, 1, 4, 5, 6]:
             c = chars[pos]
             if c.isalpha():
@@ -185,7 +170,6 @@ class UKCharPlateVoter:
         self.full_weights = defaultdict(float)
         self.full_best_conf = defaultdict(float)
         self.char_weights = [defaultdict(float) for _ in range(7)]
-        self.total_reads = 0
 
     def add(self, plate: str, conf: float, quality: float = 0.0):
         candidate = normalize_uk_candidate(plate)
@@ -194,7 +178,6 @@ class UKCharPlateVoter:
 
         weight = max(float(conf), 1.0) + min(float(quality) / 8.0, 25.0)
 
-        self.total_reads += 1
         self.full_counts[candidate] += 1
         self.full_weights[candidate] += weight
         self.full_best_conf[candidate] = max(self.full_best_conf[candidate], float(conf))
@@ -714,18 +697,43 @@ def choose_final_plate(track: Track):
     plate, method, count, weight, peak_conf = track.voter.best()
 
     if plate is not None and is_exact_uk_plate(plate):
-        return plate
+        reliable = method in ("full_vote", "char_vote") or peak_conf >= 70.0
+
+        return {
+            "plate": plate,
+            "reliable": reliable,
+            "method": method,
+            "count": count,
+            "weight": weight,
+            "peak_conf": peak_conf,
+        }
 
     if is_exact_uk_plate(track.best_plate_seen) and track.best_plate_conf >= MIN_SINGLE_READ_CONF:
-        return track.best_plate_seen
+        reliable = track.best_plate_conf >= 70.0
 
-    return "UNKNOWN"
+        return {
+            "plate": track.best_plate_seen,
+            "reliable": reliable,
+            "method": "best_single",
+            "count": 1,
+            "weight": track.best_plate_conf,
+            "peak_conf": track.best_plate_conf,
+        }
+
+    return {
+        "plate": "UNKNOWN",
+        "reliable": False,
+        "method": "none",
+        "count": 0,
+        "weight": 0.0,
+        "peak_conf": 0.0,
+    }
 
 
 # =========================================================
 # DATABASE LOGGING
 # =========================================================
-def log_violation(plate, v_class, conf, frame_img, video_filename):
+def log_violation(plate, v_class, conf, frame_img, video_filename, ocr_meta=None):
     conn = None
 
     try:
@@ -739,6 +747,9 @@ def log_violation(plate, v_class, conf, frame_img, video_filename):
         jpeg_quality = runtime_config["jpeg_quality"]
         auto_flag_threshold = runtime_config["auto_flag_threshold"]
         review_threshold = runtime_config["review_threshold"]
+
+        registry_lookup_mode = os.environ.get("REGISTRY_LOOKUP_MODE", "local").lower()
+        registry_lookup_enabled = registry_lookup_mode != "offline"
 
         row = c.execute(
             "SELECT 1 FROM intersection WHERE intersection_id = ? LIMIT 1",
@@ -760,58 +771,104 @@ def log_violation(plate, v_class, conf, frame_img, video_filename):
         )
 
         raw_plate = normalize_plate(plate)
+        ocr_meta = ocr_meta or {}
 
-        row = c.execute(
-            "SELECT 1 FROM vehicle WHERE plate_number = ? LIMIT 1",
-            (raw_plate,),
-        ).fetchone()
+        ocr_reliable = bool(ocr_meta.get("reliable", False))
+        ocr_method = ocr_meta.get("method", "unknown")
+        ocr_count = int(ocr_meta.get("count", 0) or 0)
+        ocr_weight = float(ocr_meta.get("weight", 0.0) or 0.0)
+        ocr_peak_conf = float(ocr_meta.get("peak_conf", 0.0) or 0.0)
 
-        is_registered = row is not None
+        is_registered = False
+        similar_matches = []
 
-        if not is_registered:
-            if raw_plate and raw_plate != "UNKNOWN":
-                try:
-                    c.execute(
-                        "INSERT OR IGNORE INTO vehicle (plate_number, owner_id, is_exempt) VALUES (?, NULL, 0)",
-                        (raw_plate,),
-                    )
-                    conn.commit()
-                    safe_plate = raw_plate
-                except Exception:
-                    safe_plate = UNKNOWN_PLATE_SENTINEL
-            else:
-                c.execute(
-                    "INSERT OR IGNORE INTO vehicle (plate_number, is_exempt) VALUES (?, 0)",
-                    (UNKNOWN_PLATE_SENTINEL,),
-                )
-                conn.commit()
-                safe_plate = UNKNOWN_PLATE_SENTINEL
+        if not registry_lookup_enabled:
+            registry_status = "PendingSync"
+        elif raw_plate == "UNKNOWN":
+            registry_status = "PlateNotLocked"
         else:
+            row = c.execute(
+                "SELECT 1 FROM vehicle WHERE plate_number = ? LIMIT 1",
+                (raw_plate,),
+            ).fetchone()
+
+            is_registered = row is not None
+
+            if is_registered:
+                registry_status = "ExactMatch"
+            else:
+                registry_status = "NoExactMatch"
+                try:
+                    similar_matches = find_similar_registered_plates(conn, raw_plate, limit=5)
+                except Exception as match_err:
+                    print(f"⚠️ Plate suggestion lookup failed: {match_err}")
+                    similar_matches = []
+
+        # IMPORTANT:
+        # Do not insert OCR guesses into vehicle.
+        # The vehicle table must remain the official registry/local registry mirror.
+        if is_registered:
             safe_plate = raw_plate
+        else:
+            c.execute(
+                "INSERT OR IGNORE INTO vehicle (plate_number, is_exempt) VALUES (?, 0)",
+                (UNKNOWN_PLATE_SENTINEL,),
+            )
+            conn.commit()
+            safe_plate = UNKNOWN_PLATE_SENTINEL
+
+        note_data = {
+            "detectedClass": v_class,
+            "ocrPlate": raw_plate,
+            "registered": is_registered,
+            "registryStatus": registry_status,
+            "registryLookupMode": registry_lookup_mode,
+            "ocrReliable": ocr_reliable,
+            "ocrMethod": ocr_method,
+            "ocrCount": ocr_count,
+            "ocrWeight": round(ocr_weight, 2),
+            "ocrPeakConfidence": round(ocr_peak_conf, 2),
+            "autoFlagThreshold": auto_flag_threshold,
+            "reviewThreshold": review_threshold,
+            "imageQuality": runtime_config["image_quality"],
+            "similarRegisteredPlates": similar_matches,
+        }
 
         note = (
-            f"Detected Class: {v_class}; OCR Plate: {raw_plate}; "
+            f"Detected Class: {v_class}; "
+            f"OCR Plate: {raw_plate}; "
             f"Registered: {is_registered}; "
-            f"AutoFlagThreshold: {auto_flag_threshold}; "
-            f"ReviewThreshold: {review_threshold}; "
-            f"ImageQuality: {runtime_config['image_quality']}"
+            f"RegistryStatus: {registry_status}; "
+            f"OCRReliable: {ocr_reliable}; "
+            f"OCRMethod: {ocr_method}; "
+            f"OCRPeakConfidence: {ocr_peak_conf:.1f}; "
+            f"SimilarMatches: {json.dumps(similar_matches)}; "
+            f"ReviewData={json.dumps(note_data)}"
         )
-
-        if raw_plate == "UNKNOWN":
-            note += " [PLATE NOT LOCKED]"
-        elif not is_registered:
-            note += " [UNREGISTERED — pending manual review]"
 
         if v_class != "civilian_car":
             status, decision = "Rejected", "Auto"
+
+        elif registry_status == "PendingSync":
+            status, decision = "Pending", "Flagged"
+
+        elif raw_plate == "UNKNOWN":
+            status, decision = "Pending", "Flagged"
+
         elif not is_registered:
             status, decision = "Pending", "Flagged"
-        elif conf >= auto_flag_threshold:
-            status, decision = "AutoApproved", "Auto"
-        elif conf >= review_threshold:
+
+        elif is_registered and not ocr_reliable:
             status, decision = "Pending", "Flagged"
+
+        elif is_registered and ocr_reliable and conf >= auto_flag_threshold:
+            status, decision = "AutoApproved", "Auto"
+
+        elif is_registered and conf >= review_threshold:
+            status, decision = "Pending", "Flagged"
+
         else:
-            status, decision = "Rejected", "Auto"
+            status, decision = "Pending", "Flagged"
 
         if status not in VALID_STATUSES:
             status = "Pending"
@@ -842,8 +899,12 @@ def log_violation(plate, v_class, conf, frame_img, video_filename):
 
         print(
             f"💾 V-{new_id} | OCR: {raw_plate} → {safe_plate} | "
-            f"Registered: {is_registered} | Status: {status}"
+            f"Registered: {is_registered} | Registry: {registry_status} | "
+            f"OCRReliable: {ocr_reliable} | Status: {status}"
         )
+
+        if similar_matches:
+            print(f"🔎 Similar registered plates: {similar_matches}")
 
         if SMS_AVAILABLE and is_registered and status in ("AutoApproved", "Pending"):
             try:
@@ -881,6 +942,7 @@ def finalize_event(event, ffmpeg_ok, fps):
             event["conf"],
             event["snapshot"],
             vid_name,
+            event.get("ocr_meta", None),
         )
 
 
@@ -932,15 +994,18 @@ def main():
         cv2.resizeWindow("ITMS Edge Node Feed", DISPLAY_WIDTH, DISPLAY_HEIGHT)
 
     print(
-        f"\n{'=' * 72}\n"
-        f"✅ Immediate Violation + UK Char Voting Mode | {VIDEO_SOURCE}\n"
+        f"\n{'=' * 78}\n"
+        f"✅ Immediate Violation + Safe Registry Review Mode | {VIDEO_SOURCE}\n"
         f"   G=GREEN | R=RED | Q=Quit\n"
         f"   Violation creation       : immediate on crossing\n"
-        f"   Plate finalization       : UK char-level consensus\n"
+        f"   Vehicle table            : official registry mirror only\n"
+        f"   OCR guesses inserted     : NO\n"
+        f"   Registry mode            : {os.environ.get('REGISTRY_LOOKUP_MODE', 'local')}\n"
+        f"   Plate suggestions        : DB-assisted review note\n"
         f"   Detection stride         : {DETECT_EVERY_N_FRAMES}\n"
         f"   Post-cross OCR frames    : {POST_CROSS_OCR_FRAMES}\n"
         f"   Max OCR tracks           : {MAX_ACTIVE_OCR_TRACKS}\n"
-        f"{'=' * 72}\n"
+        f"{'=' * 78}\n"
     )
 
     while cap.isOpened():
@@ -1031,6 +1096,13 @@ def main():
                             "class": pred_class,
                             "conf": track.class_conf if track.class_conf else 97.0,
                             "created_time": now,
+                            "ocr_meta": {
+                                "reliable": False,
+                                "method": "none",
+                                "count": 0,
+                                "weight": 0.0,
+                                "peak_conf": 0.0,
+                            },
                         }
 
                         pending_events.append(event)
@@ -1099,7 +1171,14 @@ def main():
                         event = event_by_id[track.event_id]
                         best_now = choose_final_plate(track)
 
-                        event["plate"] = best_now
+                        event["plate"] = best_now["plate"]
+                        event["ocr_meta"] = {
+                            "reliable": best_now["reliable"],
+                            "method": best_now["method"],
+                            "count": best_now["count"],
+                            "weight": best_now["weight"],
+                            "peak_conf": best_now["peak_conf"],
+                        }
                         event["class"] = track.pred_class if track.pred_class else event["class"]
                         event["conf"] = track.class_conf if track.class_conf else event["conf"]
 
@@ -1151,7 +1230,8 @@ def main():
                     if track.event_created and track.event_id in event_by_id:
                         event = event_by_id[track.event_id]
 
-                        final_plate = choose_final_plate(track)
+                        best_now = choose_final_plate(track)
+                        final_plate = best_now["plate"]
                         pred_class = track.pred_class if track.pred_class else event["class"]
 
                         if not is_duplicate_global_event(
@@ -1162,6 +1242,13 @@ def main():
                             now,
                         ):
                             event["plate"] = final_plate
+                            event["ocr_meta"] = {
+                                "reliable": best_now["reliable"],
+                                "method": best_now["method"],
+                                "count": best_now["count"],
+                                "weight": best_now["weight"],
+                                "peak_conf": best_now["peak_conf"],
+                            }
                             event["class"] = pred_class
                             event["conf"] = track.class_conf if track.class_conf else event["conf"]
 
@@ -1192,7 +1279,16 @@ def main():
     for track in tracks.values():
         if track.crossed_line and track.event_created and track.event_id in event_by_id:
             event = event_by_id[track.event_id]
-            event["plate"] = choose_final_plate(track)
+            best_now = choose_final_plate(track)
+
+            event["plate"] = best_now["plate"]
+            event["ocr_meta"] = {
+                "reliable": best_now["reliable"],
+                "method": best_now["method"],
+                "count": best_now["count"],
+                "weight": best_now["weight"],
+                "peak_conf": best_now["peak_conf"],
+            }
             event["class"] = track.pred_class if track.pred_class else event["class"]
             event["conf"] = track.class_conf if track.class_conf else event["conf"]
 

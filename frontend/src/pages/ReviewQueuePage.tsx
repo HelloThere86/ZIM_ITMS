@@ -13,6 +13,9 @@ import {
   Image as ImageIcon,
   Video,
   MapPin,
+  Database,
+  ShieldCheck,
+  WifiOff,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
 import { PaginationControls } from "../components/PaginationControls";
@@ -27,7 +30,45 @@ import {
 
 type StatusFilter = "All" | ReviewStatus;
 
+interface SimilarRegisteredPlate {
+  plate: string;
+  score: number;
+  distance: number;
+  format: string;
+}
+
+interface ReviewData {
+  detectedClass?: string;
+  ocrPlate?: string;
+  registered?: boolean;
+  registryStatus?: string;
+  registryLookupMode?: string;
+  ocrReliable?: boolean;
+  ocrMethod?: string;
+  ocrCount?: number;
+  ocrWeight?: number;
+  ocrPeakConfidence?: number;
+  similarRegisteredPlates?: SimilarRegisteredPlate[];
+}
+
 const ITEMS_PER_PAGE = 10;
+
+function parseReviewData(notes?: string | null): ReviewData | null {
+  if (!notes) return null;
+
+  const marker = "ReviewData=";
+  const index = notes.indexOf(marker);
+
+  if (index === -1) return null;
+
+  const jsonText = notes.slice(index + marker.length).trim();
+
+  try {
+    return JSON.parse(jsonText) as ReviewData;
+  } catch {
+    return null;
+  }
+}
 
 export function ReviewQueuePage() {
   const [cases, setCases] = useState<ReviewCase[]>([]);
@@ -66,11 +107,24 @@ export function ReviewQueuePage() {
 
   const filteredCases = useMemo(() => {
     return cases.filter((item) => {
+      const reviewData = parseReviewData(item.notes);
+      const searchableReviewText = [
+        reviewData?.ocrPlate,
+        reviewData?.registryStatus,
+        ...(reviewData?.similarRegisteredPlates?.map((match) => match.plate) ?? []),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      const query = searchTerm.toLowerCase();
+
       const matchesSearch =
-        item.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        item.plateNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        item.intersection.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        item.time.toLowerCase().includes(searchTerm.toLowerCase());
+        item.id.toLowerCase().includes(query) ||
+        item.plateNumber.toLowerCase().includes(query) ||
+        item.intersection.toLowerCase().includes(query) ||
+        item.time.toLowerCase().includes(query) ||
+        searchableReviewText.includes(query);
 
       const matchesStatus =
         statusFilter === "All" ? true : item.reviewStatus === statusFilter;
@@ -116,6 +170,8 @@ export function ReviewQueuePage() {
     cases.find((item) => item.id === selectedCaseId) ||
     null;
 
+  const selectedReviewData = parseReviewData(selectedCase?.notes);
+
   const pendingCount = cases.filter((item) => item.reviewStatus === "Pending").length;
   const approvedCount = cases.filter((item) => item.reviewStatus === "Approved").length;
   const rejectedCount = cases.filter((item) => item.reviewStatus === "Rejected").length;
@@ -141,6 +197,19 @@ export function ReviewQueuePage() {
       return "bg-yellow-100 text-yellow-800 border border-yellow-200";
     }
     return "bg-red-100 text-red-800 border border-red-200";
+  }
+
+  function getRegistryStatusClasses(status?: string) {
+    if (status === "ExactMatch") {
+      return "bg-green-100 text-green-800 border border-green-200";
+    }
+    if (status === "PendingSync") {
+      return "bg-blue-100 text-blue-800 border border-blue-200";
+    }
+    if (status === "NoExactMatch" || status === "PlateNotLocked") {
+      return "bg-yellow-100 text-yellow-800 border border-yellow-200";
+    }
+    return "bg-gray-100 text-gray-700 border border-gray-200";
   }
 
   async function handleDecision(nextStatus: "Approved" | "Rejected") {
@@ -179,8 +248,8 @@ export function ReviewQueuePage() {
             Review Queue
           </h1>
           <p className="mt-3 max-w-3xl text-sm text-gray-600">
-            This page supports semi-automated enforcement by routing uncertain or sensitive
-            cases to a reviewer before final action is taken.
+            This page supports semi-automated enforcement by routing uncertain, offline,
+            or low-confidence ANPR cases to a reviewer before final action is taken.
           </p>
         </div>
 
@@ -198,36 +267,20 @@ export function ReviewQueuePage() {
       )}
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label="Total Review Cases"
-          value={loading ? "..." : cases.length.toString()}
-          sublabel="Cases surfaced for human verification"
-        />
-        <StatCard
-          label="Pending"
-          value={loading ? "..." : pendingCount.toString()}
-          sublabel="Awaiting human decision"
-        />
-        <StatCard
-          label="Approved"
-          value={loading ? "..." : approvedCount.toString()}
-          sublabel="Confirmed after review"
-        />
-        <StatCard
-          label="Rejected"
-          value={loading ? "..." : rejectedCount.toString()}
-          sublabel="Dismissed after review"
-        />
+        <StatCard label="Total Review Cases" value={loading ? "..." : cases.length.toString()} sublabel="Cases surfaced for human verification" />
+        <StatCard label="Pending" value={loading ? "..." : pendingCount.toString()} sublabel="Awaiting human decision" />
+        <StatCard label="Approved" value={loading ? "..." : approvedCount.toString()} sublabel="Confirmed after review" />
+        <StatCard label="Rejected" value={loading ? "..." : rejectedCount.toString()} sublabel="Dismissed after review" />
       </section>
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-        <div className="xl:col-span-2 rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm xl:col-span-2">
           <div className="border-b border-gray-200 px-6 py-5">
             <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
               <div>
                 <h2 className="text-lg font-semibold text-gray-900">Queued Cases</h2>
                 <p className="mt-1 text-sm text-gray-600">
-                  Search and filter the cases currently exposed for manual verification.
+                  Search and filter cases exposed for manual verification.
                 </p>
               </div>
 
@@ -236,7 +289,7 @@ export function ReviewQueuePage() {
                   <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
                   <input
                     type="text"
-                    placeholder="Search by ID, plate, location, or time"
+                    placeholder="Search by ID, plate, OCR, match, location, or time"
                     value={searchTerm}
                     onChange={(e) => setSearchTerm(e.target.value)}
                     className="w-full rounded-lg border border-gray-300 bg-white py-2 pl-10 pr-4 text-sm text-gray-900 outline-none transition focus:border-gray-400 md:w-80"
@@ -266,9 +319,7 @@ export function ReviewQueuePage() {
             <div className="px-6 py-12">
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
                 <p className="text-base font-medium text-gray-900">No matching review cases found</p>
-                <p className="mt-2 text-sm text-gray-600">
-                  Adjust the search or filter to see more results.
-                </p>
+                <p className="mt-2 text-sm text-gray-600">Adjust the search or filter to see more results.</p>
               </div>
             </div>
           ) : (
@@ -287,54 +338,40 @@ export function ReviewQueuePage() {
                 <table className="min-w-full">
                   <thead className="border-b border-gray-200 bg-gray-50">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                        Case ID
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                        Plate Number
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                        Intersection
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                        Confidence
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">
-                        Status
-                      </th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">Case ID</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">Plate Number</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">Intersection</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">Confidence</th>
+                      <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-600">Status</th>
                     </tr>
                   </thead>
 
                   <tbody className="divide-y divide-gray-200 bg-white">
                     {paginatedCases.map((item) => {
                       const isSelected = item.id === selectedCaseId;
+                      const rowReviewData = parseReviewData(item.notes);
 
                       return (
                         <tr
                           key={item.id}
                           onClick={() => setSelectedCaseId(item.id)}
-                          className={`cursor-pointer transition ${
-                            isSelected ? "bg-gray-50" : "hover:bg-gray-50"
-                          }`}
+                          className={`cursor-pointer transition ${isSelected ? "bg-gray-50" : "hover:bg-gray-50"}`}
                         >
                           <td className="px-6 py-4 text-sm font-medium text-gray-900">{item.id}</td>
-                          <td className="px-6 py-4 text-sm text-gray-900">{item.plateNumber}</td>
+                          <td className="px-6 py-4 text-sm text-gray-900">
+                            <div className="font-medium">{item.plateNumber}</div>
+                            {rowReviewData?.ocrPlate && (
+                              <div className="mt-1 text-xs text-gray-500">OCR: {rowReviewData.ocrPlate}</div>
+                            )}
+                          </td>
                           <td className="px-6 py-4 text-sm text-gray-900">{item.intersection}</td>
                           <td className="px-6 py-4 text-sm">
-                            <span
-                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getConfidenceClasses(
-                                item.confidenceLevel
-                              )}`}
-                            >
+                            <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getConfidenceClasses(item.confidenceLevel)}`}>
                               {item.confidence}% · {item.confidenceLevel}
                             </span>
                           </td>
                           <td className="px-6 py-4 text-sm">
-                            <span
-                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                                item.reviewStatus
-                              )}`}
-                            >
+                            <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(item.reviewStatus)}`}>
                               {item.reviewStatus}
                             </span>
                           </td>
@@ -352,44 +389,109 @@ export function ReviewQueuePage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Case Review Detail</h2>
             <p className="mt-1 text-sm text-gray-600">
-              Selected case summary, evidence preview, and manual action controls.
+              Evidence, ANPR output, registry status, and manual action controls.
             </p>
           </div>
 
           {!selectedCase ? (
             <div className="mt-6 rounded-xl border border-dashed border-gray-300 bg-gray-50 p-8 text-center">
               <p className="text-sm font-medium text-gray-900">No case selected</p>
-              <p className="mt-2 text-sm text-gray-600">
-                Select a case from the queue to inspect and act on it.
-              </p>
+              <p className="mt-2 text-sm text-gray-600">Select a case from the queue to inspect and act on it.</p>
             </div>
           ) : (
             <div className="mt-6 space-y-5">
               <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
                 <div className="flex items-start justify-between gap-3">
                   <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                      Selected Review Case
-                    </p>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">Selected Review Case</p>
                     <p className="mt-1 text-lg font-semibold text-gray-900">{selectedCase.id}</p>
                   </div>
-                  <span
-                    className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                      selectedCase.reviewStatus
-                    )}`}
-                  >
+                  <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(selectedCase.reviewStatus)}`}>
                     {selectedCase.reviewStatus}
                   </span>
                 </div>
+              </div>
+
+              <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                <div className="flex items-center gap-2">
+                  <Database className="h-4 w-4 text-blue-700" />
+                  <p className="text-sm font-semibold text-blue-900">ANPR / Registry Review</p>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-blue-700">OCR Plate</p>
+                    <p className="mt-1 font-semibold text-blue-950">
+                      {selectedReviewData?.ocrPlate ?? selectedCase.plateNumber ?? "UNKNOWN"}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-blue-700">Registry Status</p>
+                    <span className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getRegistryStatusClasses(selectedReviewData?.registryStatus)}`}>
+                      {selectedReviewData?.registryStatus ?? "Unknown"}
+                    </span>
+                  </div>
+
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-blue-700">OCR Reliable</p>
+                    <p className="mt-1 font-semibold text-blue-950">
+                      {selectedReviewData?.ocrReliable ? "Yes" : "No"}
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-blue-700">Peak OCR Confidence</p>
+                    <p className="mt-1 font-semibold text-blue-950">
+                      {selectedReviewData?.ocrPeakConfidence ?? 0}%
+                    </p>
+                  </div>
+                </div>
+
+                {selectedReviewData?.registryStatus === "PendingSync" && (
+                  <div className="mt-4 flex gap-2 rounded-lg border border-blue-200 bg-white p-3 text-sm text-blue-800">
+                    <WifiOff className="mt-0.5 h-4 w-4 shrink-0" />
+                    <p>
+                      Registry lookup is pending. This case was captured at the edge node and should be verified when connectivity returns.
+                    </p>
+                  </div>
+                )}
+
+                {selectedReviewData?.similarRegisteredPlates?.length ? (
+                  <div className="mt-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">
+                      Suggested Registered Matches
+                    </p>
+
+                    <div className="mt-2 space-y-2">
+                      {selectedReviewData.similarRegisteredPlates.map((match) => (
+                        <div
+                          key={match.plate}
+                          className="flex items-center justify-between rounded-lg border border-blue-100 bg-white px-3 py-2 text-sm"
+                        >
+                          <div>
+                            <p className="font-semibold text-gray-900">{match.plate}</p>
+                            <p className="text-xs text-gray-500">{match.format}</p>
+                          </div>
+                          <p className="text-xs text-gray-500">
+                            Score {match.score} · Distance {match.distance}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm text-blue-800">
+                    No similar registered plates were found for this case.
+                  </p>
+                )}
               </div>
 
               <div className="space-y-3">
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <Eye className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Plate Number
-                    </p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Stored Plate Number</p>
                     <p className="text-sm font-medium text-gray-900">{selectedCase.plateNumber}</p>
                   </div>
                 </div>
@@ -397,9 +499,7 @@ export function ReviewQueuePage() {
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <MapPin className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Intersection
-                    </p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Intersection</p>
                     <p className="text-sm font-medium text-gray-900">{selectedCase.intersection}</p>
                   </div>
                 </div>
@@ -407,9 +507,7 @@ export function ReviewQueuePage() {
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <Clock3 className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Time
-                    </p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Time</p>
                     <p className="text-sm font-medium text-gray-900">{selectedCase.time}</p>
                   </div>
                 </div>
@@ -417,9 +515,7 @@ export function ReviewQueuePage() {
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <AlertTriangle className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Confidence
-                    </p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Confidence</p>
                     <p className="text-sm font-medium text-gray-900">
                       {selectedCase.confidence}% ({selectedCase.confidenceLevel})
                     </p>
@@ -429,9 +525,7 @@ export function ReviewQueuePage() {
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <FileText className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Detection Notes
-                    </p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Detection Notes</p>
                     <p className="text-sm font-medium text-gray-900">{selectedCase.notes}</p>
                   </div>
                 </div>
@@ -439,9 +533,7 @@ export function ReviewQueuePage() {
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
                   <UserCheck className="mt-0.5 h-4 w-4 text-gray-500" />
                   <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Evidence Type
-                    </p>
+                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">Evidence Type</p>
                     <p className="text-sm font-medium text-gray-900">{selectedCase.evidenceType}</p>
                   </div>
                 </div>
@@ -459,34 +551,17 @@ export function ReviewQueuePage() {
 
                 {videoUrl ? (
                   <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
-                    <video
-                      src={videoUrl}
-                      controls
-                      className="h-64 w-full bg-black object-contain"
-                    />
+                    <video src={videoUrl} controls className="h-64 w-full bg-black object-contain" />
                   </div>
                 ) : imageUrl ? (
                   <div className="mt-4 overflow-hidden rounded-lg border border-gray-200 bg-white">
-                    <img
-                      src={imageUrl}
-                      alt={`Evidence for ${selectedCase.id}`}
-                      className="h-64 w-full bg-gray-100 object-contain"
-                    />
+                    <img src={imageUrl} alt={`Evidence for ${selectedCase.id}`} className="h-64 w-full bg-gray-100 object-contain" />
                   </div>
                 ) : (
                   <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
-                    <p className="text-sm text-gray-600">
-                      No preview file is currently available for this case.
-                    </p>
+                    <p className="text-sm text-gray-600">No preview file is currently available for this case.</p>
                   </div>
                 )}
-
-                <div className="mt-4 rounded-lg border border-gray-200 bg-white p-4">
-                  <p className="text-xs uppercase tracking-wide text-gray-500">Evidence Type</p>
-                  <p className="mt-1 text-sm font-medium text-gray-900">
-                    {selectedCase.evidenceType}
-                  </p>
-                </div>
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -509,11 +584,16 @@ export function ReviewQueuePage() {
                 </button>
               </div>
 
-              <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-                <p className="text-sm font-semibold text-blue-900">Current status</p>
-                <p className="mt-2 text-sm text-blue-800">
-                  Decisions from this page are saved to the backend and reflected in the audit log.
-                </p>
+              <div className="rounded-xl border border-green-200 bg-green-50 p-4">
+                <div className="flex items-start gap-2">
+                  <ShieldCheck className="mt-0.5 h-4 w-4 text-green-700" />
+                  <div>
+                    <p className="text-sm font-semibold text-green-900">Human-in-the-loop safeguard</p>
+                    <p className="mt-1 text-sm text-green-800">
+                      Officers can use the evidence and suggested registry matches before approving or rejecting the case.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -528,7 +608,7 @@ export function ReviewQueuePage() {
           <div>
             <h2 className="text-lg font-semibold text-gray-900">Why This Page Matters</h2>
             <p className="mt-1 text-sm text-gray-600">
-              This page supports the transparency and fairness story of the project.
+              This page supports transparency, fairness, and auditability in the enforcement workflow.
             </p>
           </div>
         </div>
@@ -536,23 +616,17 @@ export function ReviewQueuePage() {
         <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-3">
           <div className="rounded-lg border border-gray-200 p-4">
             <p className="text-sm font-medium text-gray-900">Human Oversight</p>
-            <p className="mt-2 text-sm text-gray-600">
-              Low-confidence cases are not enforced blindly.
-            </p>
+            <p className="mt-2 text-sm text-gray-600">Low-confidence cases are not enforced blindly.</p>
           </div>
 
           <div className="rounded-lg border border-gray-200 p-4">
-            <p className="text-sm font-medium text-gray-900">Operational Control</p>
-            <p className="mt-2 text-sm text-gray-600">
-              Review actions can be tracked and justified.
-            </p>
+            <p className="text-sm font-medium text-gray-900">Offline-First Operation</p>
+            <p className="mt-2 text-sm text-gray-600">Edge nodes can store evidence before registry connectivity returns.</p>
           </div>
 
           <div className="rounded-lg border border-gray-200 p-4">
             <p className="text-sm font-medium text-gray-900">Audit Readiness</p>
-            <p className="mt-2 text-sm text-gray-600">
-              Each review decision is captured in your system logs for traceability.
-            </p>
+            <p className="mt-2 text-sm text-gray-600">Each review decision is captured for traceability.</p>
           </div>
         </div>
       </section>

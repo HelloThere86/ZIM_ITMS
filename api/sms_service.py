@@ -69,16 +69,18 @@ def latest_sms_already_sent(conn, violation_id: int) -> bool:
     return c.fetchone() is not None
 
 def build_sms_message(row):
+    # Extract the variables we need from the database row
     violation_code = f"V-{row['violation_id']}"
+    plate_number = row["plate_number"] or "UNKNOWN"
     timestamp = row["timestamp"] or "unknown time"
-    driver_name = row["driver_name"] or "Citizen"
-    fine_amount = row["fine_amount"]
 
+    # Return the carrier-safe formatted string
     return (
-        f"ZRP ITMS ALERT:\n"
-        f"Dear {driver_name}, a red-light violation ({violation_code}) was recorded for vehicle {row['plate_number']} on {timestamp}.\n"
-        f"Fine: USD ${fine_amount:.2f}.\n"
-        f"Please pay via EcoCash or visit the nearest ZRP traffic office."
+        f"TICKET REF: {violation_code}\n"
+        f"VEHICLE: {plate_number}\n"
+        f"DATE: {timestamp}\n"
+        f"STATUS: Pending Review.\n"
+        f"Please visit the nearest ZRP office to clear this notice."
     )
 
 def insert_notification_log(conn, violation_id, recipient_phone, message_text, status, provider="Twilio", provider_message_id=None, error_message=None):
