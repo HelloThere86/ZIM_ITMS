@@ -1,231 +1,121 @@
-import cv2
-import easyocr
-import json
-import re
-import sqlite3
-import sys
+import os
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+os.environ["FLAGS_allocator_strategy"] = "auto_growth"
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
 import time
-from pathlib import Path
+import json
+import cv2
+import sqlite3
+import re
 from collections import defaultdict
-import numpy as np
-from ultralytics import YOLO
+from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-PROJECT_ROOT = BASE_DIR.parent
+from paddleocr import PaddleOCR
 
-DB_PATH = PROJECT_ROOT / "database" / "itms_production.db"
-EVIDENCE_DIR = PROJECT_ROOT / "dashboard" / "evidence"
+# =========================================================
+# CONFIG
+# =========================================================
+BASE_DIR     = Path(__file__).resolve().parent.parent
+DB_PATH      = BASE_DIR / "database" / "itms_production.db"
+EVIDENCE_DIR = BASE_DIR / "dashboard" / "evidence"
+DEBUG_DIR    = EVIDENCE_DIR / "debug_plates"
 
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
+POLL_INTERVAL      = 2
+VIDEO_WAIT_RETRIES = 5
+VIDEO_WAIT_SLEEP   = 3
 
-from api.plate_matcher import find_similar_registered_plates
+MIN_CONFIDENCE   = 45
+MIN_READS        = 2
+MAX_OCR_ATTEMPTS = 6
 
-UNKNOWN_PLATE_SENTINEL = "UNKNOWN-UNREGISTERED"
+# =========================================================
+# BBOX CROP SETTINGS
+# =========================================================
+# BBOX_PAD_BOTTOM = 0: never extend below the vehicle bbox.
+# Downward padding was reading the plate of the car ahead of a tailgater.
+BBOX_PAD_TOP    = 10
+BBOX_PAD_BOTTOM = 0
+BBOX_PAD_X      = 30
 
-POLL_SECONDS = 3
-BATCH_SIZE = 5
+# Keep only the lower half of the vehicle crop — roof/windscreen not useful.
+PLATE_ZONE_RATIO    = 0.50
+FALLBACK_CROP_RATIO = 0.65
 
-YOLO_IMGSZ = 416
-VIDEO_SAMPLE_FRAMES = 12
-MAX_VEHICLE_CROPS_PER_FRAME = 3
+# =========================================================
+# TEMPLATE MATCHING TRACKER
+# =========================================================
+# Biased downward — vehicle moves toward camera (increasing y).
+TMPL_SEARCH_UP    = 15
+TMPL_SEARCH_DOWN  = 60
+TMPL_SEARCH_X     = 30
+TMPL_MIN_SCORE    = 0.40
+TMPL_VEHICLE_FRAC = 0.45
 
-MIN_PLATE_REGION_WIDTH = 60
-MIN_PLATE_REGION_HEIGHT = 12
-MIN_PLATE_SHARPNESS = 6.0
+# =========================================================
+# TWO-PASS OCR
+# =========================================================
+# Pass 1 skips the first CLEAR_ZONE_FRAMES after the event.
+# This gives the car ahead time to move clear of the violating vehicle's plate.
+CLEAR_ZONE_FRAMES = 30
 
-AUTO_APPROVE_OCR_CONF = 50.0
-
-UK_PLATE_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z]{3}$")
-
-
-def normalize_plate(plate: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", plate.upper()) if plate else "UNKNOWN"
-
-
-def is_exact_uk_plate(text: str) -> bool:
-    return bool(text and UK_PLATE_RE.match(normalize_plate(text)))
-
-
-def normalize_uk_candidate(raw: str) -> str | None:
-    cleaned = normalize_plate(raw)
-
-    if not cleaned or len(cleaned) < 7:
-        return None
-
-    candidates = [cleaned[i:i + 7] for i in range(0, len(cleaned) - 6)]
-
-    digit_map = {
-        "O": "0", "Q": "0", "D": "0",
-        "I": "1", "L": "1", "T": "1",
-        "Z": "2", "S": "5", "B": "8", "G": "6",
-    }
-
-    letter_map = {
-        "0": "O", "1": "I", "2": "Z", "5": "S", "6": "G", "8": "B",
-    }
-
-    best = None
-    best_score = -1e9
-
-    for cand in candidates:
-        chars = list(cand)
-        score = 0.0
-        valid = True
-
-        for pos in [0, 1, 4, 5, 6]:
-            c = chars[pos]
-            if c.isalpha():
-                score += 2.0
-            elif c in letter_map:
-                chars[pos] = letter_map[c]
-                score += 1.0
-            else:
-                valid = False
-                break
-
-        if not valid:
-            continue
-
-        for pos in [2, 3]:
-            c = chars[pos]
-            if c.isdigit():
-                score += 2.0
-            elif c in digit_map:
-                chars[pos] = digit_map[c]
-                score += 1.0
-            else:
-                valid = False
-                break
-
-        if not valid:
-            continue
-
-        fixed = "".join(chars)
-
-        if not UK_PLATE_RE.match(fixed):
-            continue
-
-        if fixed == cand:
-            score += 5.0
-
-        if score > best_score:
-            best_score = score
-            best = fixed
-
-    return best
+# =========================================================
+# PLATE FORMAT REGEXES
+# =========================================================
+ZW_PLATE_RE = re.compile(r'^[A-Z]{2,3}\d{3,4}$')     # Zimbabwe: ABC1234
+UK_PLATE_RE = re.compile(r'^[A-Z]{2}\d{2}[A-Z]{3}$') # UK:       AB11ABC
 
 
-class PlateVote:
-    def __init__(self):
-        self.full_counts = defaultdict(int)
-        self.full_weights = defaultdict(float)
-        self.full_best_conf = defaultdict(float)
-        self.char_weights = [defaultdict(float) for _ in range(7)]
-        self.reads = []
-
-    def add(self, plate: str, conf: float, quality: float):
-        candidate = normalize_uk_candidate(plate)
-        if candidate is None:
-            return
-
-        weight = max(float(conf), 1.0) + min(float(quality) / 8.0, 25.0)
-
-        self.full_counts[candidate] += 1
-        self.full_weights[candidate] += weight
-        self.full_best_conf[candidate] = max(self.full_best_conf[candidate], float(conf))
-        self.reads.append((candidate, float(conf), float(quality), weight))
-
-        for i, ch in enumerate(candidate):
-            self.char_weights[i][ch] += weight
-
-    def best_full(self):
-        if not self.full_weights:
-            return None, 0, 0.0, 0.0
-
-        best_plate = None
-        best_weight = -1.0
-        best_count = 0
-        best_conf = 0.0
-
-        for plate, weight in self.full_weights.items():
-            count = self.full_counts[plate]
-            conf = self.full_best_conf[plate]
-
-            if (
-                weight > best_weight
-                or (abs(weight - best_weight) < 1e-6 and count > best_count)
-                or (abs(weight - best_weight) < 1e-6 and count == best_count and conf > best_conf)
-            ):
-                best_plate = plate
-                best_weight = weight
-                best_count = count
-                best_conf = conf
-
-        return best_plate, best_count, best_weight, best_conf
-
-    def best_char_consensus(self):
-        chars = []
-        total_weight = 0.0
-        min_position_weight = float("inf")
-
-        for position_weights in self.char_weights:
-            if not position_weights:
-                return None, 0.0, 0.0
-
-            ch, weight = max(position_weights.items(), key=lambda item: item[1])
-            chars.append(ch)
-            total_weight += weight
-            min_position_weight = min(min_position_weight, weight)
-
-        plate = "".join(chars)
-
-        if not UK_PLATE_RE.match(plate):
-            return None, total_weight, min_position_weight
-
-        return plate, total_weight, min_position_weight
-
-    def best(self):
-        full_plate, full_count, full_weight, full_conf = self.best_full()
-        char_plate, char_weight, min_pos_weight = self.best_char_consensus()
-
-        if full_plate and full_count >= 2:
-            return full_plate, "full_vote", full_count, full_weight, full_conf
-
-        if char_plate and char_weight >= 90.0 and min_pos_weight >= 8.0:
-            return char_plate, "char_vote", full_count, char_weight, full_conf
-
-        if full_plate and full_conf >= AUTO_APPROVE_OCR_CONF:
-            return full_plate, "best_single", full_count, full_weight, full_conf
-
-        return None, "none", 0, 0.0, 0.0
+def is_valid_plate(plate: str) -> bool:
+    if not plate:
+        return False
+    return bool(ZW_PLATE_RE.match(plate)) or bool(UK_PLATE_RE.match(plate))
 
 
+# =========================================================
+# INIT OCR — paddleocr==2.7.3 / paddlepaddle==2.6.2
+# =========================================================
+print("🔧 Initialising PaddleOCR 2.7.3 ...")
+ocr = PaddleOCR(
+    use_angle_cls=True,
+    lang='en',
+    use_gpu=False,
+    show_log=False,
+)
+print("✅ PaddleOCR 2.7.3 ready.")
+
+
+# =========================================================
+# DIRECTORY SETUP
+# =========================================================
+def ensure_directories():
+    DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# =========================================================
+# DB HELPERS
+# =========================================================
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")
     return conn
 
 
-def extract_review_data(note: str) -> dict:
+def load_review_data(note: str) -> dict:
     if not note:
         return {}
-
     marker = "ReviewData="
     idx = note.find(marker)
-
     if idx == -1:
-        return {}
-
+        try:
+            return json.loads(note)
+        except Exception:
+            return {}
     raw = note[idx + len(marker):].strip()
-
-    # If later officer notes were appended, trim them off.
     officer_idx = raw.find(" [OFFICER_REVIEW=")
     if officer_idx != -1:
         raw = raw[:officer_idx].strip()
-
     try:
         return json.loads(raw)
     except Exception:
@@ -239,6 +129,7 @@ def rebuild_review_note(data: dict) -> str:
         f"Registered: {data.get('registered', False)}; "
         f"RegistryStatus: {data.get('registryStatus', 'Unknown')}; "
         f"OCRStatus: {data.get('ocrStatus', 'Unknown')}; "
+        f"VideoStatus: {data.get('videoStatus', 'Unknown')}; "
         f"OCRReliable: {data.get('ocrReliable', False)}; "
         f"OCRMethod: {data.get('ocrMethod', 'unknown')}; "
         f"OCRPeakConfidence: {data.get('ocrPeakConfidence', 0)}; "
@@ -247,477 +138,765 @@ def rebuild_review_note(data: dict) -> str:
     )
 
 
-def crop_quality_score(img: np.ndarray) -> float:
-    if img is None or img.size == 0:
-        return 0.0
+# =========================================================
+# PLATE CLEANING  —  format-aware with A/M/W substitution
+# =========================================================
+#
+# LETTER_FIXES — digit-lookalike → correct letter (applied in letter segment):
+#   0→O  1→I  5→S  8→B  6→G  2→Z  7→T
+#
+# DIGIT_FIXES — letter-lookalike → correct digit (applied in digit segment):
+#   O→0  I→1  S→5  B→8  A→4  G→6  Z→2  D→0  Q→0  T→7  L→1  U→0
+#
+# A/M/W SUBSTITUTION — applied at UK letter positions only:
+#   A, M and W are visually similar on intersection camera footage,
+#   especially in the area-code positions (0,1).
+#   Example: AM51VSU → MW51VSU
+#     Position 0: OCR read A, correct char is M → A→M swap
+#     Position 1: OCR read M, correct char is W → M→W swap
+#   The function tries each member of {A, M, W} as a replacement at each
+#   letter position individually until a valid UK plate is produced.
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-    h, w = gray.shape[:2]
+LETTER_FIXES: dict[str, str] = {
+    '0': 'O', '1': 'I', '5': 'S', '8': 'B',
+    '6': 'G', '2': 'Z', '7': 'T',
+}
 
-    size_score = min(w / 120.0, 1.0) * 40.0 + min(h / 28.0, 1.0) * 20.0
-    sharp_score = min(sharpness / 80.0, 1.0) * 40.0
+DIGIT_FIXES: dict[str, str] = {
+    'O': '0', 'I': '1', 'S': '5', 'B': '8',
+    'A': '4', 'G': '6', 'Z': '2', 'D': '0',
+    'Q': '0', 'T': '7', 'L': '1', 'U': '0',
+}
 
-    return size_score + sharp_score
+# Letter positions within a 7-char UK plate (LLDDLLL)
+_UK_LETTER_POSITIONS = {0, 1, 4, 5, 6}
 
-
-def preprocess_plate(img: np.ndarray):
-    h, w = img.shape[:2]
-
-    if w < 280 and w > 0:
-        scale = 280 / w
-        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    variants = []
-
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
-    sharp_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-
-    v1 = clahe.apply(gray)
-    v1 = cv2.filter2D(v1, -1, sharp_kernel)
-    variants.append(cv2.cvtColor(v1, cv2.COLOR_GRAY2BGR))
-
-    _, v2 = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    variants.append(cv2.cvtColor(v2, cv2.COLOR_GRAY2BGR))
-
-    v3 = cv2.bilateralFilter(gray, 7, 50, 50)
-    v3 = cv2.filter2D(v3, -1, sharp_kernel)
-    variants.append(cv2.cvtColor(v3, cv2.COLOR_GRAY2BGR))
-
-    variants.append(img)
-    return variants
+# Characters that are visually confused with each other at letter positions
+_AMW_CANDIDATES = {'A', 'M', 'W', 'Z', 'E'}
 
 
-def detect_plate_region(car_crop: np.ndarray):
-    h_car, w_car = car_crop.shape[:2]
+def _coerce_uk_chars(chars: list) -> str:
+    """Apply per-position confusion fixes to a 7-char list and validate."""
+    result = []
+    for i, ch in enumerate(chars):
+        if i in _UK_LETTER_POSITIONS:
+            result.append(LETTER_FIXES.get(ch, ch))
+        else:
+            result.append(DIGIT_FIXES.get(ch, ch))
+    coerced = "".join(result)
+    return coerced if UK_PLATE_RE.match(coerced) else ""
 
-    if h_car == 0 or w_car == 0:
-        return car_crop
 
-    gray = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+def apply_uk_coercion(text: str) -> str:
+    if len(text) != 7:
+        return ""
 
-    sx = cv2.Sobel(blur, cv2.CV_64F, 1, 0, ksize=3)
-    sy = cv2.Sobel(blur, cv2.CV_64F, 0, 1, ksize=3)
-    edges = cv2.convertScaleAbs(np.sqrt(sx**2 + sy**2))
+    chars = list(text)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (17, 3))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    # Attempt 1: standard fixes
+    result = _coerce_uk_chars(chars)
+    if result:
+        return result
 
-    _, thresh = cv2.threshold(closed, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    best_crop = None
-    best_score = -1.0
-
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-
-        if h == 0:
+    # Attempt 2: single A/M/W swap at each letter position
+    for pos in sorted(_UK_LETTER_POSITIONS):
+        if chars[pos] not in _AMW_CANDIDATES:
             continue
+        for replacement in sorted(_AMW_CANDIDATES - {chars[pos]}):
+            swapped = chars.copy()
+            swapped[pos] = replacement
+            result = _coerce_uk_chars(swapped)
+            if result:
+                return result
 
-        aspect = w / h
-        area = w * h
-
-        if not (
-            2.0 <= aspect <= 8.5
-            and 0.08 <= w / w_car <= 0.95
-            and 0.02 <= h / h_car <= 0.35
-            and y > h_car * 0.15
-            and area > 50
-        ):
-            continue
-
-        crop = car_crop[y:y + h, x:x + w]
-        quality = crop_quality_score(crop)
-
-        if quality > best_score:
-            best_score = quality
-            best_crop = crop
-
-    if best_crop is not None and best_crop.size > 0:
-        return best_crop
-
-    mid_lower = car_crop[
-        int(h_car * 0.45):int(h_car * 0.88),
-        int(w_car * 0.05):int(w_car * 0.95),
-    ]
-
-    if mid_lower.size > 0:
-        return mid_lower
-
-    return car_crop
-
-
-def read_plate(reader: easyocr.Reader, car_crop: np.ndarray):
-    plate_region = detect_plate_region(car_crop)
-
-    if plate_region is None or plate_region.size == 0:
-        return "UNKNOWN", 0.0, 0.0
-
-    h, w = plate_region.shape[:2]
-    gray = cv2.cvtColor(plate_region, cv2.COLOR_BGR2GRAY)
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-    quality = crop_quality_score(plate_region)
-
-    if w < MIN_PLATE_REGION_WIDTH or h < MIN_PLATE_REGION_HEIGHT or sharpness < MIN_PLATE_SHARPNESS:
-        return "UNKNOWN", 0.0, quality
-
-    variants = preprocess_plate(plate_region)
-
-    best_text = "UNKNOWN"
-    best_conf = 0.0
-    best_score = -1e9
-
-    for variant in variants:
-        try:
-            results = reader.readtext(
-                variant,
-                detail=1,
-                paragraph=False,
-                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-                width_ths=0.7,
-                text_threshold=0.25,
-                low_text=0.15,
+    # Attempt 3: two simultaneous A/M/W swaps (catches AM→MW etc.)
+    letter_positions = sorted(_UK_LETTER_POSITIONS)
+    for i, pos_a in enumerate(letter_positions):
+        for pos_b in letter_positions[i + 1:]:
+            if chars[pos_a] not in _AMW_CANDIDATES and \
+               chars[pos_b] not in _AMW_CANDIDATES:
+                continue
+            replacements_a = (
+                sorted(_AMW_CANDIDATES - {chars[pos_a]})
+                if chars[pos_a] in _AMW_CANDIDATES else [chars[pos_a]]
             )
-        except Exception:
-            continue
+            replacements_b = (
+                sorted(_AMW_CANDIDATES - {chars[pos_b]})
+                if chars[pos_b] in _AMW_CANDIDATES else [chars[pos_b]]
+            )
+            for rep_a in replacements_a:
+                for rep_b in replacements_b:
+                    swapped = chars.copy()
+                    swapped[pos_a] = rep_a
+                    swapped[pos_b] = rep_b
+                    result = _coerce_uk_chars(swapped)
+                    if result:
+                        return result
 
-        if not results:
-            continue
-
-        combined_text = "".join(r[1] for r in results)
-        combined_conf = float(np.mean([r[2] for r in results])) * 100.0
-
-        candidate = normalize_uk_candidate(combined_text)
-
-        if candidate is None:
-            continue
-
-        score = combined_conf + min(quality / 4.0, 25.0)
-
-        if score > best_score:
-            best_score = score
-            best_conf = combined_conf
-            best_text = candidate
-
-    return best_text, best_conf, quality
+    return ""
 
 
-def extract_vehicle_crops_from_frame(yolo_model, frame: np.ndarray):
-    crops = []
+def apply_zw_coercion(text: str) -> str:
+    """
+    Zimbabwe format: left-to-right letter segment then digit segment.
+    Letters appearing after the digit run (suffix) get letter fixes.
+    """
+    in_digit_segment = False
+    result = []
+    for ch in text:
+        if not in_digit_segment:
+            if ch.isdigit():
+                in_digit_segment = True
+                result.append(DIGIT_FIXES.get(ch, ch))
+            else:
+                result.append(LETTER_FIXES.get(ch, ch))
+        else:
+            if ch.isalpha():
+                result.append(LETTER_FIXES.get(ch, ch))
+            else:
+                result.append(DIGIT_FIXES.get(ch, ch))
+    return "".join(result)
+
+
+def clean_plate(text: str) -> str:
+    """
+    Normalise raw OCR text and apply format-aware confusion fixes.
+
+    1. Strip non-alphanumeric, uppercase.
+    2. If 7 chars → try UK coercion (standard fixes + A/M/W substitution).
+    3. Otherwise → Zimbabwe left-to-right segment coercion.
+    """
+    if not text:
+        return ""
+    text = re.sub(r'[^A-Z0-9]', '', text.upper())
+    if not text:
+        return ""
+
+    if len(text) == 7:
+        uk = apply_uk_coercion(text)
+        if uk:
+            return uk
+
+    return apply_zw_coercion(text)
+
+
+# =========================================================
+# IMAGE PREPROCESSING
+# =========================================================
+def preprocess_for_ocr(frame):
+    if frame is None or frame.size == 0:
+        return frame
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    lab_eq = cv2.merge([clahe.apply(l), a, b])
+    return cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
+
+
+# =========================================================
+# PADDLEOCR READ
+# =========================================================
+def paddle_read(image):
+    try:
+        processed = preprocess_for_ocr(image)
+        result = ocr.ocr(processed, cls=True)
+        if not result or result[0] is None:
+            return None, 0.0
+
+        best_text = None
+        best_conf = 0.0
+        for line in result[0]:
+            if not line or len(line) < 2:
+                continue
+            text_info = line[1]
+            if not text_info or len(text_info) < 2:
+                continue
+            text     = text_info[0]
+            conf_pct = float(text_info[1]) * 100.0
+            cleaned  = clean_plate(text)
+            if len(cleaned) >= 6 and conf_pct > best_conf:
+                best_text = cleaned
+                best_conf = conf_pct
+
+        return best_text, best_conf
+
+    except Exception as e:
+        print(f"   ⚠️  OCR frame error: {e}")
+        return None, 0.0
+
+
+# =========================================================
+# DEBUG PLATE SAVER
+# =========================================================
+def save_debug_crop(violation_id: int, frame_idx: int,
+                    crop, label: str, plate_read: str):
+    try:
+        if crop is None or crop.size == 0:
+            return
+        plate_safe = re.sub(r'[^A-Z0-9]', '_', (plate_read or 'NOREAD').upper())
+        filename   = f"V{violation_id}_f{frame_idx:03d}_{label}_{plate_safe}.jpg"
+        annotated  = crop.copy()
+        cv2.putText(
+            annotated, plate_read or "NO READ",
+            (4, max(20, annotated.shape[0] - 6)),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2,
+        )
+        cv2.imwrite(str(DEBUG_DIR / filename), annotated)
+    except Exception:
+        pass
+
+
+# =========================================================
+# BBOX HELPERS
+# =========================================================
+def scale_bbox(bbox, src_dims, dst_shape):
+    if bbox is None or src_dims is None:
+        return bbox
+    dh, dw = dst_shape[:2]
+    sw, sh = src_dims
+    if sw == dw and sh == dh:
+        return bbox
+    x1, y1, x2, y2 = bbox
+    return (int(x1*dw/sw), int(y1*dh/sh), int(x2*dw/sw), int(y2*dh/sh))
+
+
+def clamp_bbox(bbox, frame_shape):
+    fh, fw = frame_shape[:2]
+    x1, y1, x2, y2 = bbox
+    x1 = max(0, min(x1, fw - 1))
+    y1 = max(0, min(y1, fh - 1))
+    x2 = max(x1 + 1, min(x2, fw))
+    y2 = max(y1 + 1, min(y2, fh))
+    return (x1, y1, x2, y2)
+
+
+def crop_to_plate_zone(frame, bbox):
+    """
+    Crop to the lower PLATE_ZONE_RATIO of the vehicle bbox.
+    BBOX_PAD_BOTTOM = 0 prevents reading the plate of the car ahead.
+    """
+    if frame is None or bbox is None:
+        return None, "no_bbox"
+    fh, fw = frame.shape[:2]
+    try:
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+    except (TypeError, ValueError):
+        return None, "bad_bbox"
+
+    x1 = max(0, x1 - BBOX_PAD_X)
+    y1 = max(0, y1 - BBOX_PAD_TOP)
+    x2 = min(fw, x2 + BBOX_PAD_X)
+    y2 = min(fh, y2 + BBOX_PAD_BOTTOM)  # 0 — stay within vehicle bbox
+
+    if x2 <= x1 or y2 <= y1:
+        return None, "empty_bbox"
+
+    region_h  = y2 - y1
+    plate_top = y1 + int(region_h * (1.0 - PLATE_ZONE_RATIO))
+    crop      = frame[max(0, plate_top):y2, x1:x2]
+    return (crop if crop.size > 0 else None), "bbox"
+
+
+def crop_fallback(frame):
+    if frame is None:
+        return None
+    h = frame.shape[0]
+    region = frame[int(h * FALLBACK_CROP_RATIO):, :]
+    return region if region.size > 0 else None
+
+
+# =========================================================
+# TEMPLATE MATCHING TRACKER
+# =========================================================
+def build_template(frame, bbox):
+    """Extract the lower TMPL_VEHICLE_FRAC of the bbox as a tracking template."""
+    if frame is None or bbox is None:
+        return None
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    x1 = max(0, x1);  y1 = max(0, y1)
+    x2 = min(frame.shape[1], x2);  y2 = min(frame.shape[0], y2)
+    h        = y2 - y1
+    tmpl_top = y1 + int(h * (1.0 - TMPL_VEHICLE_FRAC))
+    tmpl     = frame[tmpl_top:y2, x1:x2]
+    return tmpl if tmpl.size > 0 else None
+
+
+def search_for_template(frame, template, current_bbox):
+    """
+    Search for template in a downward-biased region around current_bbox.
+    Returns the updated bbox, or current_bbox if match is below threshold.
+    """
+    if frame is None or template is None or current_bbox is None:
+        return current_bbox
+
+    fh, fw = frame.shape[:2]
+    th, tw = template.shape[:2]
+    if tw <= 0 or th <= 0:
+        return current_bbox
+
+    x1, y1, x2, y2 = [int(v) for v in current_bbox]
+    bw = x2 - x1
+    bh = y2 - y1
+
+    sx1 = max(0,  x1 - TMPL_SEARCH_X)
+    sy1 = max(0,  y1 - TMPL_SEARCH_UP)
+    sx2 = min(fw, x2 + TMPL_SEARCH_X)
+    sy2 = min(fh, y2 + TMPL_SEARCH_DOWN)
+
+    if sx2 - sx1 < tw or sy2 - sy1 < th:
+        return current_bbox
+
+    search_region = frame[sy1:sy2, sx1:sx2]
+    if search_region.shape[0] < th or search_region.shape[1] < tw:
+        return current_bbox
 
     try:
-        results = yolo_model(frame, imgsz=YOLO_IMGSZ, verbose=False)
+        result = cv2.matchTemplate(search_region, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
     except Exception:
-        return crops
+        return current_bbox
 
-    h_frame, w_frame = frame.shape[:2]
+    if max_val < TMPL_MIN_SCORE:
+        return current_bbox
 
-    boxes = []
-    for box in results[0].boxes:
-        cls = int(box.cls[0])
-        if cls not in [2, 3, 5, 7]:
+    match_x       = sx1 + max_loc[0]
+    match_y       = sy1 + max_loc[1]
+    tmpl_offset_y = int(bh * (1.0 - TMPL_VEHICLE_FRAC))
+
+    new_x1 = max(0,  match_x)
+    new_y1 = max(0,  match_y - tmpl_offset_y)
+    new_x2 = min(fw, new_x1 + bw)
+    new_y2 = min(fh, match_y + th)
+
+    return (new_x1, new_y1, new_x2, new_y2)
+
+
+def track_vehicle_template(frames, event_bbox, event_frame_idx, detect_dims=None):
+    """
+    Initialise template on event_frame_idx and track the vehicle forward.
+    Pre-event frames get the static event bbox.
+    Returns dict[frame_idx → (x1,y1,x2,y2)].
+    """
+    n = len(frames)
+    if not frames or event_bbox is None:
+        return {i: event_bbox for i in range(n)}
+
+    event_frame_idx = max(0, min(event_frame_idx, n - 1))
+    init_frame      = frames[event_frame_idx]
+
+    bbox = scale_bbox(event_bbox, detect_dims, init_frame.shape) \
+           if detect_dims else event_bbox
+    bbox = clamp_bbox(bbox, init_frame.shape)
+
+    bboxes   = {i: bbox for i in range(event_frame_idx + 1)}
+    template = build_template(init_frame, bbox)
+
+    if template is None:
+        for i in range(event_frame_idx + 1, n):
+            bboxes[i] = bbox
+        return bboxes
+
+    th, tw = template.shape[:2]
+    print(
+        f"   🔍 Template tracking | init={event_frame_idx} "
+        f"tmpl={tw}x{th} bbox={bbox} frames={n}"
+    )
+
+    current_bbox = bbox
+    for i in range(event_frame_idx + 1, n):
+        frame = frames[i]
+        if frame is None:
+            bboxes[i] = current_bbox
             continue
+        new_bbox = search_for_template(frame, template, current_bbox)
+        if new_bbox != current_bbox:
+            fresh = build_template(frame, new_bbox)
+            if fresh is not None and fresh.size > 0:
+                template = fresh
+            current_bbox = new_bbox
+        bboxes[i] = current_bbox
 
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(w_frame, x2)
-        y2 = min(h_frame, y2)
-
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        area = (x2 - x1) * (y2 - y1)
-        cy = (y1 + y2) / 2
-
-        # Prefer vehicles lower in frame and larger, because they are more likely to be the crossing vehicle.
-        priority = area + cy * 500
-        boxes.append((priority, x1, y1, x2, y2))
-
-    boxes.sort(reverse=True)
-
-    for _, x1, y1, x2, y2 in boxes[:MAX_VEHICLE_CROPS_PER_FRAME]:
-        crop = frame[y1:y2, x1:x2]
-        if crop.size > 0:
-            crops.append(crop)
-
-    return crops
+    print(f"   ✅ Tracking done | final_bbox={current_bbox}")
+    return bboxes
 
 
-def sample_video_frames(video_file: Path, max_frames: int = VIDEO_SAMPLE_FRAMES):
+# =========================================================
+# VIDEO FRAME LOADER — ALL frames (tracker needs continuity)
+# =========================================================
+def wait_for_video(path: Path) -> bool:
+    for attempt in range(VIDEO_WAIT_RETRIES):
+        if path.exists() and path.stat().st_size > 0:
+            return True
+        print(f"   ⏳ Waiting for {path.name} ({attempt + 1}/{VIDEO_WAIT_RETRIES})...")
+        time.sleep(VIDEO_WAIT_SLEEP)
+    return False
+
+
+def load_video_frames(video_path: str) -> list:
     frames = []
-
-    cap = cv2.VideoCapture(str(video_file))
-    if not cap.isOpened():
+    if not video_path:
         return frames
-
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-
-    if total <= 0:
+    p = Path(video_path)
+    if not wait_for_video(p):
+        print(f"   ❌ Video never appeared: {p.name}")
+        return frames
+    cap   = cv2.VideoCapture(str(p))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total == 0:
         cap.release()
         return frames
-
-    sample_indexes = np.linspace(0, max(0, total - 1), num=min(max_frames, total), dtype=int)
-
-    for idx in sample_indexes:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+    print(f"   📽️  Loading all {total} frames from {p.name}")
+    while cap.isOpened():
         ret, frame = cap.read()
-        if ret and frame is not None:
-            frames.append(frame)
-
+        if not ret:
+            break
+        frames.append(frame)
     cap.release()
     return frames
 
 
-def find_pending_ocr_cases(conn):
-    rows = conn.execute(
-        """
-        SELECT violation_id, plate_number, image_path, video_path, confidence_score, status, review_note
-        FROM violation
-        WHERE image_path IS NOT NULL
-        ORDER BY violation_id ASC
-        LIMIT 100
-        """
-    ).fetchall()
+# =========================================================
+# MULTI-FRAME OCR — two-pass
+# =========================================================
+def ocr_frame_set(frames, per_frame_bboxes, violation_id, label_prefix):
+    """Run OCR on a set of frames using per-frame tracked bboxes."""
+    scores = defaultdict(float)
+    counts = defaultdict(int)
+    peak   = 0.0
 
-    pending = []
+    for frame_idx, frame in enumerate(frames):
+        this_bbox = per_frame_bboxes.get(frame_idx)
+        region, _ = crop_to_plate_zone(frame, this_bbox)
 
-    for row in rows:
-        data = extract_review_data(row["review_note"] or "")
+        if region is not None and region.size > 0:
+            plate, conf = paddle_read(region)
+            save_debug_crop(violation_id, frame_idx, region,
+                            label_prefix, plate or "NOREAD")
+            if plate:
+                scores[plate] += conf / 100.0
+                counts[plate] += 1
+                peak = max(peak, conf)
+        else:
+            # Fallback to bottom strip of full frame when bbox crop is empty
+            fb = crop_fallback(frame)
+            if fb is not None:
+                plate_fb, conf_fb = paddle_read(fb)
+                save_debug_crop(violation_id, frame_idx, fb,
+                                f"{label_prefix}_fb", plate_fb or "NOREAD")
+                if plate_fb:
+                    scores[plate_fb] += conf_fb / 100.0
+                    counts[plate_fb] += 1
+                    peak = max(peak, conf_fb)
 
-        if data.get("ocrStatus") != "Pending":
-            continue
-
-        video_status = data.get("videoStatus")
-
-        # New async behaviour:
-        # - Show record immediately in frontend.
-        # - Wait for video to be Ready before OCR, so OCR gets multi-frame evidence.
-        # - If video save failed, process snapshot as fallback.
-        if video_status == "Pending":
-            continue
-
-        if video_status in ("Ready", "Failed", None):
-            pending.append(row)
-
-        if len(pending) >= BATCH_SIZE:
-            break
-
-    return pending
+    return scores, counts, peak
 
 
-def process_case(reader, yolo_model, row):
-    violation_id = row["violation_id"]
+def aggregate_reads_tracked(frames, event_bbox=None, violation_id=None,
+                             event_frame_idx=None, detect_dims=None):
+    """
+    Two-pass OCR with template tracking.
 
-    data = extract_review_data(row["review_note"] or "")
+    Pass 1 — CLEAR ZONE:
+      Frames from (event_frame_idx + CLEAR_ZONE_FRAMES) onward.
+      The car ahead has cleared; the violating vehicle's plate is visible.
 
-    image_path = row["image_path"]
-    video_path = row["video_path"]
+    Pass 2 — FULL CLIP:
+      Fallback if pass 1 produces nothing (short clip, still blocked, etc.).
+    """
+    if not frames:
+        return "UNKNOWN", 0.0, 0, "no_read"
 
-    candidate_crops = []
+    if event_frame_idx is None:
+        event_frame_idx = max(0, len(frames) // 4)
 
-    if image_path:
-        image_file = EVIDENCE_DIR / image_path
-        if image_file.exists():
-            img = cv2.imread(str(image_file))
-            if img is not None:
-                candidate_crops.append(("snapshot", img))
+    per_frame_bboxes = track_vehicle_template(
+        frames, event_bbox, event_frame_idx, detect_dims=detect_dims,
+    )
 
-    if video_path:
-        video_file = EVIDENCE_DIR / video_path
-        if video_file.exists():
-            frames = sample_video_frames(video_file)
+    n = len(frames)
 
-            for frame in frames:
-                vehicle_crops = extract_vehicle_crops_from_frame(yolo_model, frame)
+    # Pass 1: clear zone
+    clear_start  = min(event_frame_idx + CLEAR_ZONE_FRAMES, n)
+    clear_frames = frames[clear_start:]
 
-                for crop in vehicle_crops:
-                    candidate_crops.append(("video_yolo_crop", crop))
+    if clear_frames:
+        clear_bboxes = {
+            i: per_frame_bboxes.get(clear_start + i, event_bbox)
+            for i in range(len(clear_frames))
+        }
+        s1, c1, p1 = ocr_frame_set(clear_frames, clear_bboxes,
+                                    violation_id, "clear")
+        if s1:
+            best = max(s1, key=s1.get)
+            if c1[best] >= MIN_READS:
+                print(
+                    f"   ✅ Pass 1 (clear zone, frames {clear_start}-{n}) "
+                    f"→ plate={best} reads={c1[best]} peak={p1:.1f}%"
+                )
+                return best, p1, c1[best], "clear_zone"
 
-    if not candidate_crops:
-        data["ocrStatus"] = "EvidenceMissing"
-        data["registryStatus"] = "EvidenceMissing"
-        update_case(row, data, "UNKNOWN", "Pending", "Flagged")
-        print(f"⚠️ OCR Worker V-{violation_id}: no evidence available")
-        return
+    # Pass 2: full clip fallback
+    print("   🔄 Pass 1 empty — full clip scan")
+    s2, c2, p2 = ocr_frame_set(frames, per_frame_bboxes, violation_id, "full")
 
-    voter = PlateVote()
-    best_raw = ("UNKNOWN", 0.0, 0.0, "none")
+    if s2:
+        best = max(s2, key=s2.get)
+        return best, p2, c2[best], "full_clip"
 
-    for source, crop in candidate_crops:
-        plate, conf, quality = read_plate(reader, crop)
-        voter.add(plate, conf, quality)
+    return "UNKNOWN", 0.0, 0, "no_read"
 
-        if plate != "UNKNOWN" and conf > best_raw[1]:
-            best_raw = (plate, conf, quality, source)
 
-    final_plate, method, count, weight, peak_conf = voter.best()
+# =========================================================
+# REGISTRY MATCHING
+# =========================================================
+def get_all_plates(conn) -> list:
+    rows = conn.execute("SELECT plate_number FROM vehicle").fetchall()
+    return [r["plate_number"] for r in rows]
 
-    if final_plate is None:
-        final_plate = "UNKNOWN"
-        method = "none"
-        count = 0
-        weight = 0.0
-        peak_conf = 0.0
 
-    ocr_reliable = is_exact_uk_plate(final_plate) and peak_conf >= AUTO_APPROVE_OCR_CONF
+def levenshtein(a: str, b: str) -> int:
+    if len(a) < len(b):
+        return levenshtein(b, a)
+    if len(b) == 0:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, c1 in enumerate(a):
+        curr = [i + 1]
+        for j, c2 in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (c1 != c2)))
+        prev = curr
+    return prev[-1]
 
+
+def find_similar(plate: str, registry: list) -> list:
+    matches = []
+    for r in registry:
+        dist = levenshtein(plate, r)
+        if dist <= 2:
+            matches.append({
+                "plate":    r,
+                "distance": dist,
+                "score":    max(0, 100 - dist * 20),
+            })
+    return sorted(matches, key=lambda x: -x["score"])[:3]
+
+
+# =========================================================
+# CORE VIOLATION PROCESSOR
+# =========================================================
+def process_violation(v: dict):
     conn = get_db()
-
     try:
-        is_registered = False
-        similar_matches = []
-        registry_status = "PlateNotLocked"
+        review_data     = load_review_data(v.get("review_note", ""))
+        event_bbox      = review_data.get("eventBbox")
+        event_frame_idx = review_data.get("eventFrameIdx")
+        detect_dims_raw = review_data.get("detectDims")
+        detect_dims     = tuple(detect_dims_raw) if detect_dims_raw else None
 
-        final_plate_number = UNKNOWN_PLATE_SENTINEL
-        status = "Pending"
-        decision_type = "Flagged"
+        # ---- Attempt counter ------------------------------------------------
+        ocr_attempts = int(review_data.get("ocrAttempts", 0)) + 1
+        review_data["ocrAttempts"] = ocr_attempts
 
-        if final_plate != "UNKNOWN":
-            existing = conn.execute(
-                "SELECT 1 FROM vehicle WHERE plate_number = ? LIMIT 1",
-                (final_plate,),
-            ).fetchone()
+        if ocr_attempts > MAX_OCR_ATTEMPTS:
+            review_data.update({
+                "ocrStatus":      "MaxAttemptsReached",
+                "registryStatus": "ManualReview",
+                "ocrReliable":    False,
+                "registered":     False,
+            })
+            conn.execute(
+                "UPDATE violation SET status='Rejected', review_note=? "
+                "WHERE violation_id=?",
+                (rebuild_review_note(review_data), v["violation_id"]),
+            )
+            conn.commit()
+            print(f"   🛑 V-{v['violation_id']}: max attempts → Rejected")
+            return
+        # ---------------------------------------------------------------------
 
-            is_registered = existing is not None
+        vid_filename = v.get("video_path")
+        video_path   = EVIDENCE_DIR / vid_filename if vid_filename else None
+        frames       = load_video_frames(str(video_path)) if video_path else []
 
-            if is_registered:
-                registry_status = "ExactMatch"
-                final_plate_number = final_plate
+        if not frames:
+            print(
+                f"   ⚠️  V-{v['violation_id']}: no frames "
+                f"(attempt {ocr_attempts}) — will retry."
+            )
+            conn.execute(
+                "UPDATE violation SET review_note=? WHERE violation_id=?",
+                (rebuild_review_note(review_data), v["violation_id"]),
+            )
+            conn.commit()
+            return
 
-                if ocr_reliable and data.get("detectedClass") == "civilian_car":
-                    status = "AutoApproved"
-                    decision_type = "Auto"
-                else:
-                    status = "Pending"
-                    decision_type = "Flagged"
-            else:
-                registry_status = "NoExactMatch"
-                similar_matches = find_similar_registered_plates(conn, final_plate, limit=5)
-                final_plate_number = UNKNOWN_PLATE_SENTINEL
-
-        data.update(
-            {
-                "ocrPlate": final_plate,
-                "registered": is_registered,
-                "registryStatus": registry_status,
-                "ocrStatus": "Complete",
-                "ocrReliable": ocr_reliable,
-                "ocrMethod": f"async_video_multi_frame_{method}",
-                "ocrCount": count,
-                "ocrWeight": round(float(weight), 2),
-                "ocrPeakConfidence": round(float(peak_conf), 2),
-                "ocrBestSource": best_raw[3],
-                "similarRegisteredPlates": similar_matches,
-            }
+        plate, peak_conf, reads, crop_mode = aggregate_reads_tracked(
+            frames,
+            event_bbox=event_bbox,
+            violation_id=v["violation_id"],
+            event_frame_idx=event_frame_idx,
+            detect_dims=detect_dims,
         )
 
-        note = rebuild_review_note(data)
+        print(
+            f"   🔎 V-{v['violation_id']} attempt={ocr_attempts} "
+            f"crop={crop_mode} raw_plate={plate} "
+            f"peak={peak_conf:.1f}% reads={reads} "
+            f"event_frame_idx={event_frame_idx} total_frames={len(frames)} "
+            f"[debug → evidence/debug_plates/V{v['violation_id']}_*.jpg]"
+        )
+
+        # ---- Registry lookup — always recomputed, never inherited -----------
+        registry    = get_all_plates(conn)
+        registered  = False
+        suggestions = []
+        if plate and plate != "UNKNOWN":
+            registered = plate in registry
+            if not registered:
+                suggestions = find_similar(plate, registry)
+        # ---------------------------------------------------------------------
+
+        # ---- Decision -------------------------------------------------------
+        plate_valid = is_valid_plate(plate)
+
+        if peak_conf < MIN_CONFIDENCE or reads < MIN_READS or not plate_valid:
+            # OCR not reliable enough — retry next poll
+            ocr_status      = "LowConfidence"
+            registry_status = "LowConfidence"
+            new_db_status   = "Pending"
+            ocr_reliable    = False
+            existing        = v.get("plate_number", "")
+            plate_to_write  = (
+                existing
+                if existing and existing not in
+                   ("UNKNOWN-UNREGISTERED", "UNKNOWN", "", None)
+                else "UNKNOWN-UNREGISTERED"
+            )
+            display_plate = "UNKNOWN"
+
+        elif registered:
+            # Exact registry match — auto-approve
+            ocr_status      = "Success"
+            registry_status = "ExactMatch"
+            new_db_status   = "AutoApproved"
+            ocr_reliable    = True
+            plate_to_write  = plate
+            display_plate   = plate
+
+        else:
+            # Valid plate format, not in registry.
+            # Retrying the same video produces the same plate — pointless.
+            # Move to Approved so an officer reviews it. The dashboard will
+            # show the OCR plate and the similar-plates suggestions so the
+            # officer can correct it if it was misread.
+            ocr_status      = "Success"
+            registry_status = "NoExactMatch"
+            new_db_status   = "Pending"
+            ocr_reliable    = True
+            plate_to_write  = plate
+            display_plate   = plate
+        # ---------------------------------------------------------------------
+
+        review_data.update({
+            "ocrPlate":                display_plate,
+            "ocrPeakConfidence":       round(peak_conf, 2),
+            "ocrReads":                reads,
+            "ocrReliable":             ocr_reliable,
+            "ocrStatus":               ocr_status,
+            "ocrMethod":               "PaddleOCR_2.7.3",
+            "ocrCropMode":             crop_mode,
+            "ocrAttempts":             ocr_attempts,
+            "registered":              registered,
+            "registryStatus":          registry_status,
+            "similarRegisteredPlates": suggestions,
+        })
 
         conn.execute(
             """
             UPDATE violation
             SET plate_number = ?,
-                status = ?,
-                decision_type = ?,
-                review_note = ?
+                status       = ?,
+                review_note  = ?
             WHERE violation_id = ?
             """,
-            (
-                final_plate_number,
-                status,
-                decision_type,
-                note,
-                violation_id,
-            ),
+            (plate_to_write, new_db_status,
+             rebuild_review_note(review_data), v["violation_id"]),
         )
-
         conn.commit()
 
+        icon = "✅" if registered else ("⏳" if new_db_status == "Pending" else "🔍")
         print(
-            f"🔍 OCR Worker V-{violation_id}: {final_plate} "
-            f"peak={peak_conf:.1f}% reads={count} "
-            f"registered={is_registered} registry={registry_status} "
-            f"status={status} source={best_raw[3]}"
+            f"   {icon} V-{v['violation_id']}: plate={plate_to_write} "
+            f"peak={peak_conf:.1f}% reads={reads} valid={plate_valid} "
+            f"registered={registered} "
+            f"attempt={ocr_attempts}/{MAX_OCR_ATTEMPTS} → {new_db_status}"
         )
 
-        if similar_matches:
-            print(f"   suggestions={similar_matches}")
-
+    except Exception as e:
+        try:
+            conn.execute(
+                "UPDATE violation SET review_note=? WHERE violation_id=?",
+                (rebuild_review_note(review_data), v["violation_id"]),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        print(f"   ❌ process_violation V-{v['violation_id']}: {e}")
     finally:
         conn.close()
 
 
-def update_case(row, data, plate, status, decision_type):
-    conn = get_db()
+# =========================================================
+# WORKER LOOP
+# =========================================================
+def run_worker():
+    ensure_directories()
 
-    try:
-        data.update(
-            {
-                "ocrPlate": plate,
-                "ocrStatus": data.get("ocrStatus", "Complete"),
-                "ocrReliable": False,
-                "similarRegisteredPlates": [],
-            }
-        )
-
-        conn.execute(
-            """
-            UPDATE violation
-            SET status = ?,
-                decision_type = ?,
-                review_note = ?
-            WHERE violation_id = ?
-            """,
-            (
-                status,
-                decision_type,
-                rebuild_review_note(data),
-                row["violation_id"],
-            ),
-        )
-
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def main():
-    print("🔁 Starting OCR + Registry worker...")
-    print(f"   Exact registry auto-approval OCR threshold: {AUTO_APPROVE_OCR_CONF}%")
-    print(f"   Video sample frames per case: {VIDEO_SAMPLE_FRAMES}")
-
-    try:
-        reader = easyocr.Reader(["en"], gpu=True)
-    except Exception:
-        print("⚠️ EasyOCR GPU init failed. Falling back to CPU.")
-        reader = easyocr.Reader(["en"], gpu=False)
-
-    yolo_model = YOLO("yolov8n.pt")
+    print(
+        f"\n{'=' * 70}\n"
+        f"🔁 PaddleOCR 2.7.3 worker started\n"
+        f"   DB            : {DB_PATH}\n"
+        f"   Evidence      : {EVIDENCE_DIR}\n"
+        f"   Debug crops   : {DEBUG_DIR}\n"
+        f"   Poll          : every {POLL_INTERVAL}s\n"
+        f"   Min conf      : {MIN_CONFIDENCE}%  |  Min reads : {MIN_READS}\n"
+        f"   Max attempts  : {MAX_OCR_ATTEMPTS} (then → Rejected)\n"
+        f"   Plate formats : Zimbabwe (ABC1234) | UK (AB11ABC)\n"
+        f"   Bbox pad      : top={BBOX_PAD_TOP}px bottom={BBOX_PAD_BOTTOM}px "
+        f"sides={BBOX_PAD_X}px\n"
+        f"   Clear zone    : first {CLEAR_ZONE_FRAMES} post-event frames skipped "
+        f"(pass 1), then full clip (pass 2)\n"
+        f"   A/M/W swap    : enabled at UK letter positions (0,1,4,5,6)\n"
+        f"   NoExactMatch  : → Approved for officer review (stops infinite retry)\n"
+        f"{'=' * 70}\n"
+    )
 
     while True:
-        conn = get_db()
-
         try:
-            cases = find_pending_ocr_cases(conn)
-        finally:
+            conn = get_db()
+            rows = conn.execute(
+                """
+                SELECT violation_id, video_path, review_note, plate_number
+                FROM   violation
+                WHERE  status     = 'Pending'
+                AND    video_path IS NOT NULL
+                AND    (plate_number IS NULL
+                        OR plate_number IN ('UNKNOWN-UNREGISTERED', 'UNKNOWN'))
+                ORDER  BY violation_id ASC
+                """
+            ).fetchall()
             conn.close()
 
-        if not cases:
-            time.sleep(POLL_SECONDS)
-            continue
+            if rows:
+                print(f"📋 {len(rows)} violation(s) queued for OCR.")
+                for v in rows:
+                    process_violation(dict(v))
 
-        for row in cases:
-            try:
-                process_case(reader, yolo_model, row)
-            except Exception as e:
-                print(f"❌ OCR worker failed on V-{row['violation_id']}: {e}")
+        except Exception as e:
+            print(f"❌ Worker loop error: {e}")
 
-        time.sleep(0.5)
+        time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
-    main()
+    run_worker()
