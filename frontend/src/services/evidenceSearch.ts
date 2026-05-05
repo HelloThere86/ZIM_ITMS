@@ -52,7 +52,6 @@ export function logEvidenceAccess(
 ): Promise<EvidenceAccessResponse> {
   return postJson<EvidenceAccessResponse>(`/evidence-search/${violationId}/access`, {
     action,
-    userId: null,
     note,
   });
 }

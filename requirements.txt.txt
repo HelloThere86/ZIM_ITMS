@@ -7,3 +7,8 @@ pandas
 numpy
 traci
 sumolib
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt<4
+python-multipart
+email-validator

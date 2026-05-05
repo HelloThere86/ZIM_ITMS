@@ -6,11 +6,9 @@ import {
   Clock3,
   CheckCircle2,
   GitCompareArrows,
-  AlertTriangle,
   TrendingDown,
   Trophy,
   Network,
-  Cpu,
 } from "lucide-react";
 import { StatCard } from "../components/StatCard";
 import { getTrafficResults } from "../services/traffic";

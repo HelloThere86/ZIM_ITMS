@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from api.auth import UserOut, require_permission, router as auth_router
 from api.sms_service import process_sms_for_violation
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ EVIDENCE_DIR = PROJECT_ROOT / "dashboard" / "evidence"
 TRAFFIC_RESULTS_PATH = PROJECT_ROOT / "results" / "comparison_results.json"
 
 app = FastAPI(title="ITMS Backend API")
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -223,7 +225,7 @@ def write_audit_log(
 
 
 @app.get("/api/stats")
-def get_stats():
+def get_stats(_: UserOut = Depends(require_permission("violations:read"))):
     conn = get_db()
     c = conn.cursor()
 
@@ -247,7 +249,7 @@ def get_stats():
 
 
 @app.get("/api/violations")
-def get_violations():
+def get_violations(_: UserOut = Depends(require_permission("violations:read"))):
     conn = get_db()
     c = conn.cursor()
 
@@ -291,7 +293,7 @@ def get_violations():
 
 
 @app.get("/api/traffic-results")
-def get_traffic_results():
+def get_traffic_results(_: UserOut = Depends(require_permission("results:read"))):
     try:
         return load_traffic_results()
     except Exception as e:
@@ -299,7 +301,7 @@ def get_traffic_results():
 
 
 @app.get("/api/review-queue")
-def get_review_queue():
+def get_review_queue(_: UserOut = Depends(require_permission("violations:approve"))):
     conn = get_db()
     c = conn.cursor()
 
@@ -344,7 +346,11 @@ def get_review_queue():
     return cases
 
 @app.post("/api/review-queue/{violation_code}/decision")
-def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
+def decide_review_case(
+    violation_code: str,
+    payload: ReviewDecisionRequest,
+    user: UserOut = Depends(require_permission("violations:approve")),
+):
     if payload.decision not in ["Approved", "Rejected"]:
         raise HTTPException(status_code=400, detail="Decision must be 'Approved' or 'Rejected'")
 
@@ -437,7 +443,7 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
                     review_note = ?
                 WHERE violation_id = ?
                 """,
-                (payload.decision, final_plate, payload.reviewerUserId, reviewed_at, updated_note, violation_id),
+                (payload.decision, final_plate, user.user_id, reviewed_at, updated_note, violation_id),
             )
         else:
             c.execute(
@@ -450,7 +456,7 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
                     review_note = ?
                 WHERE violation_id = ?
                 """,
-                (payload.decision, payload.reviewerUserId, reviewed_at, updated_note, violation_id),
+                (payload.decision, user.user_id, reviewed_at, updated_note, violation_id),
             )
 
         sms_result = None
@@ -459,7 +465,7 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
                 sms_result = process_sms_for_violation(
                     conn=conn,
                     violation_id=violation_id,
-                    user_id=payload.reviewerUserId,
+                    user_id=user.user_id,
                     note="Automatic SMS after human approval",
                 )
             except Exception as sms_err:
@@ -471,14 +477,14 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
         new_state = {
             "plate_number": final_plate,
             "status": payload.decision,
-            "reviewer_user_id": payload.reviewerUserId,
+            "reviewer_user_id": user.user_id,
             "reviewed_at": reviewed_at,
             "review_note": updated_note,
         }
 
         write_audit_log(
             conn=conn,
-            user_id=payload.reviewerUserId,
+            user_id=user.user_id,
             action_type=f"Review {payload.decision}",
             entity_type="Violation",
             entity_id=f"V-{violation_id}",
@@ -499,7 +505,7 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
         # If any foreign key issues still happen, we rollback so the DB doesn't lock!
         conn.rollback()
         print(f"DEBUG: IntegrityError caught: {e}")
-        raise HTTPException(status_code=400, detail="Database integrity error: Cannot reject. Ensure UI passes correct User ID.")
+        raise HTTPException(status_code=400, detail="Database integrity error while saving the review decision.")
     
     finally:
         # This will ALWAYS execute, meaning your database will never lock up during the demo
@@ -512,6 +518,7 @@ def get_evidence_search(
     dateFrom: Optional[str] = Query(default=None),
     dateTo: Optional[str] = Query(default=None),
     status: Optional[str] = Query(default=None),
+    _: UserOut = Depends(require_permission("evidence:read")),
 ):
     conn = get_db()
     c = conn.cursor()
@@ -583,9 +590,15 @@ def get_evidence_search(
 
 
 @app.post("/api/evidence-search/{violation_code}/access")
-def log_evidence_access(violation_code: str, payload: EvidenceAccessRequest):
+def log_evidence_access(
+    violation_code: str,
+    payload: EvidenceAccessRequest,
+    user: UserOut = Depends(require_permission("evidence:read")),
+):
     if payload.action not in ["Viewed", "Exported"]:
         raise HTTPException(status_code=400, detail="Action must be 'Viewed' or 'Exported'")
+    if payload.action == "Exported" and "evidence:export" not in user.permissions:
+        raise HTTPException(status_code=403, detail="You do not have permission to export evidence.")
 
     violation_id = parse_violation_id(violation_code)
     conn = get_db()
@@ -609,7 +622,7 @@ def log_evidence_access(violation_code: str, payload: EvidenceAccessRequest):
 
     write_audit_log(
         conn=conn,
-        user_id=payload.userId,
+        user_id=user.user_id,
         action_type="Evidence Accessed",
         entity_type="Violation",
         entity_id=f"V-{violation_id}",
@@ -633,7 +646,7 @@ def log_evidence_access(violation_code: str, payload: EvidenceAccessRequest):
 
 
 @app.get("/api/violations/{violation_id}/sms")
-def get_sms_log(violation_id: int):
+def get_sms_log(violation_id: int, _: UserOut = Depends(require_permission("sms:send"))):
     conn = get_db()
     c = conn.cursor()
     c.execute(
@@ -654,7 +667,11 @@ def get_sms_log(violation_id: int):
 
 
 @app.post("/api/violations/{violation_code}/send-sms")
-def send_violation_sms(violation_code: str, payload: SendSmsRequest):
+def send_violation_sms(
+    violation_code: str,
+    payload: SendSmsRequest,
+    user: UserOut = Depends(require_permission("sms:send")),
+):
     violation_id = parse_violation_id(violation_code)
     conn = get_db()
 
@@ -662,7 +679,7 @@ def send_violation_sms(violation_code: str, payload: SendSmsRequest):
         result = process_sms_for_violation(
             conn=conn,
             violation_id=violation_id,
-            user_id=payload.userId,
+            user_id=user.user_id,
             note=payload.note or "Manual SMS trigger from API/UI",
         )
         conn.commit()
@@ -676,7 +693,7 @@ def send_violation_sms(violation_code: str, payload: SendSmsRequest):
 
 
 @app.get("/api/notifications/sms")
-def get_sms_notifications():
+def get_sms_notifications(_: UserOut = Depends(require_permission("sms:send"))):
     conn = get_db()
     c = conn.cursor()
 
@@ -720,7 +737,7 @@ def get_sms_notifications():
 
 
 @app.get("/api/audit-log")
-def get_audit_log():
+def get_audit_log(_: UserOut = Depends(require_permission("audit:read"))):
     conn = get_db()
     c = conn.cursor()
 
@@ -734,9 +751,10 @@ def get_audit_log():
             a.old_value,
             a.new_value,
             a.note,
-            u.full_name as actor_name
+            COALESCE(au.full_name, su.full_name) as actor_name
         FROM audit_log a
-        LEFT JOIN system_user u ON a.user_id = u.user_id
+        LEFT JOIN users au ON a.user_id = au.user_id
+        LEFT JOIN system_user su ON a.user_id = su.user_id
         ORDER BY a.timestamp DESC
     """
     c.execute(query)
@@ -777,7 +795,7 @@ def get_audit_log():
 
 
 @app.get("/api/config")
-def get_config():
+def get_config(_: UserOut = Depends(require_permission("settings:read"))):
     conn = get_db()
     c = conn.cursor()
 
@@ -787,8 +805,9 @@ def get_config():
             sc.config_value,
             sc.updated_at,
             sc.updated_by,
-            su.full_name as updated_by_name
+            COALESCE(au.full_name, su.full_name) as updated_by_name
         FROM system_config sc
+        LEFT JOIN users au ON sc.updated_by = au.user_id
         LEFT JOIN system_user su ON sc.updated_by = su.user_id
         ORDER BY sc.config_key ASC
     """
@@ -810,7 +829,11 @@ def get_config():
 
 
 @app.put("/api/config/{config_key}")
-def update_config(config_key: str, payload: ConfigUpdateRequest):
+def update_config(
+    config_key: str,
+    payload: ConfigUpdateRequest,
+    user: UserOut = Depends(require_permission("settings:write")),
+):
     conn = get_db()
     c = conn.cursor()
 
@@ -842,18 +865,18 @@ def update_config(config_key: str, payload: ConfigUpdateRequest):
             updated_at = CURRENT_TIMESTAMP,
             updated_by = excluded.updated_by
         """,
-        (config_key, payload.configValue, payload.updatedBy),
+        (config_key, payload.configValue, user.user_id),
     )
 
     new_state = {
         "config_key": config_key,
         "config_value": payload.configValue,
-        "updated_by": payload.updatedBy,
+        "updated_by": user.user_id,
     }
 
     write_audit_log(
         conn=conn,
-        user_id=payload.updatedBy,
+        user_id=user.user_id,
         action_type="Configuration Updated",
         entity_type="System_Config",
         entity_id=config_key,
@@ -869,7 +892,7 @@ def update_config(config_key: str, payload: ConfigUpdateRequest):
 
 
 @app.get("/api/fines")
-def get_fines():
+def get_fines(_: UserOut = Depends(require_permission("fines:read"))):
     conn = get_db()
     c = conn.cursor()
     c.execute("SELECT violation_name, fine_amount, currency FROM fine_matrix")

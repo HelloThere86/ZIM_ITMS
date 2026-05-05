@@ -40,6 +40,12 @@ database/*.db
 database/*.sqlite
 database/*.sqlite3
 
+# SQLite runtime files
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+
 # Models / weights
 *.h5
 *.hdf5

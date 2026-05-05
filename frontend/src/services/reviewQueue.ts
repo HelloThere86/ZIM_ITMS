@@ -34,7 +34,6 @@ export function submitReviewDecision(
 ): Promise<ReviewDecisionResponse> {
   return postJson<ReviewDecisionResponse>(`/review-queue/${violationId}/decision`, {
     decision,
-    reviewerUserId: null,
     note: correctedPlateNumber
       ? `Officer selected/corrected plate: ${correctedPlateNumber}`
       : "",

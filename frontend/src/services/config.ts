@@ -25,7 +25,6 @@ export function updateConfig(
 ): Promise<UpdateConfigResponse> {
   return putJson<UpdateConfigResponse>(`/config/${key}`, {
     configValue: value,
-    updatedBy: null,
     note: note ?? `Configuration '${key}' updated from frontend`,
   });
 }

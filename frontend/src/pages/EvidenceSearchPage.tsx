@@ -22,6 +22,7 @@ import {
   type EvidenceRecord,
   type EvidenceStatus,
 } from "../services/evidenceSearch";
+import { useAuth } from "../context/AuthContext";
 
 type StatusFilter = "All" | EvidenceStatus;
 
@@ -90,6 +91,7 @@ function parseReviewData(notes?: string | null): ReviewData | null {
 const ITEMS_PER_PAGE = 10;
 
 export function EvidenceSearchPage() {
+  const { can } = useAuth();
   const [plateNumber, setPlateNumber] = useState("");
   const [intersection, setIntersection] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -100,6 +102,7 @@ export function EvidenceSearchPage() {
   const [loading, setLoading] = useState(true);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const canExport = can("evidence:export");
 
   const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -245,7 +248,7 @@ export function EvidenceSearchPage() {
   }
 
   async function handleExportSelected() {
-    if (!selectedRecord) return;
+    if (!selectedRecord || !canExport) return;
 
     const assetUrl =
       buildBackendAssetUrl(selectedRecord.videoUrl) ||
@@ -573,11 +576,11 @@ export function EvidenceSearchPage() {
           <div className="border-t border-gray-200 px-6 py-4 flex justify-end">
             <button
               onClick={handleExportSelected}
-              disabled={!selectedRecord}
+              disabled={!selectedRecord || !canExport}
               className="inline-flex items-center gap-2 rounded-lg bg-gray-800 px-5 py-2 text-sm font-medium text-white transition hover:bg-gray-900 disabled:opacity-50"
             >
               <FileDown className="h-4 w-4" />
-              Export Selected Evidence
+              {canExport ? "Export Selected Evidence" : "Export Restricted"}
             </button>
           </div>
         </div>

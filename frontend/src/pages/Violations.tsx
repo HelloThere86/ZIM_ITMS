@@ -23,6 +23,7 @@ import {
   type Stats,
   type Violation,
 } from "../services/violations";
+import { useAuth } from "../context/AuthContext";
 
 type StatusFilter = "All" | "Flagged" | "Approved" | "Rejected";
 type SmsDisplayStatus = "Not Sent" | "Sent" | "Skipped" | "Failed" | "Queued";
@@ -30,6 +31,7 @@ type SmsDisplayStatus = "Not Sent" | "Sent" | "Skipped" | "Failed" | "Queued";
 const ITEMS_PER_PAGE = 10;
 
 export function ViolationsPage() {
+  const { can } = useAuth();
   const [selectedViolationId, setSelectedViolationId] = useState<string | null>(null);
   const [violations, setViolations] = useState<Violation[]>([]);
   const [stats, setStats] = useState<Stats>({ Flagged: 0, Approved: 0, Rejected: 0 });
@@ -43,25 +45,55 @@ export function ViolationsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("All");
   const [currentPage, setCurrentPage] = useState(1);
+  const canSeeSms = can("sms:send");
 
   async function loadData() {
     try {
       setPageError(null);
 
-      const [violationsData, statsData, smsData] = await Promise.all([
+      const [violationsResult, statsResult, smsResult] = await Promise.allSettled([
         getViolations(),
         getStats(),
-        getSmsNotifications(),
+        canSeeSms
+          ? getSmsNotifications()
+          : Promise.resolve([] as SmsNotification[]),
       ]);
 
-      setViolations(violationsData);
-      setStats(statsData);
-      setSmsNotifications(smsData);
+      const errors: string[] = [];
+      let violationsData: Violation[] = [];
+
+      if (violationsResult.status === "fulfilled") {
+        violationsData = violationsResult.value;
+        setViolations(violationsData);
+      } else {
+        errors.push("violations");
+        setViolations([]);
+      }
+
+      if (statsResult.status === "fulfilled") {
+        setStats(statsResult.value);
+      } else {
+        errors.push("violation stats");
+        setStats({ Flagged: 0, Approved: 0, Rejected: 0 });
+      }
+
+      if (smsResult.status === "fulfilled") {
+        setSmsNotifications(smsResult.value);
+      } else {
+        setSmsNotifications([]);
+        if (canSeeSms) {
+          errors.push("sms notifications");
+        }
+      }
 
       setSelectedViolationId((prev) => {
         const stillExists = prev && violationsData.some((item) => item.id === prev);
         return stillExists ? prev : violationsData[0]?.id ?? null;
       });
+
+      if (errors.length > 0) {
+        setPageError(`Failed to load ${errors.join(", ")} from backend.`);
+      }
     } catch (error) {
       console.error("Error loading violations page data:", error);
       setPageError("Failed to load violations or SMS data from backend.");
@@ -236,7 +268,7 @@ export function ViolationsPage() {
         </section>
       )}
 
-      {smsMessage && (
+      {canSeeSms && smsMessage && (
         <section className="rounded-xl border border-blue-200 bg-blue-50 p-4">
           <p className="text-sm font-semibold text-blue-900">SMS result</p>
           <p className="mt-1 text-sm text-red-800">{smsMessage}</p>
@@ -504,66 +536,68 @@ export function ViolationsPage() {
                 </div>
               </div>
 
-              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                <div className="flex items-start gap-3">
-                  <Smartphone className="mt-0.5 h-4 w-4 text-gray-500" />
-                  <div className="w-full">
-                    <div className="flex items-center justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-semibold text-gray-900">SMS Notification</p>
-                        <p className="mt-1 text-sm text-gray-600">
-                          Send a violation notice to the registered vehicle owner when eligible.
+              {canSeeSms && (
+                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                  <div className="flex items-start gap-3">
+                    <Smartphone className="mt-0.5 h-4 w-4 text-gray-500" />
+                    <div className="w-full">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900">SMS Notification</p>
+                          <p className="mt-1 text-sm text-gray-600">
+                            Send a violation notice to the registered vehicle owner when eligible.
+                          </p>
+                        </div>
+
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getSmsStatusClasses(
+                            currentSmsStatus
+                          )}`}
+                        >
+                          {currentSmsStatus}
+                        </span>
+                      </div>
+
+                      <div className="mt-4 space-y-2 text-sm text-gray-700">
+                        <p>
+                          <span className="font-medium text-gray-900">Recipient:</span>{" "}
+                          {latestSmsForSelected?.recipientPhone ?? "Not available yet"}
+                        </p>
+                        <p>
+                          <span className="font-medium text-gray-900">Provider:</span>{" "}
+                          {latestSmsForSelected?.provider ?? "MockSMS / none yet"}
+                        </p>
+
+                        <div className="mt-3 rounded-md border border-gray-200 bg-white p-3 shadow-sm">
+                          <p className="mb-1 text-[10px] font-bold uppercase text-gray-400">
+                            Generated SMS Message Content:
+                          </p>
+                          <p className="text-xs italic leading-relaxed text-gray-600">
+                            {latestSmsForSelected?.messageText ||
+                              "Awaiting system sync to generate message..."}
+                          </p>
+                        </div>
+
+                        <p className="mt-2">
+                          <span className="font-medium text-gray-900">Latest Result:</span>{" "}
+                          {latestSmsForSelected?.errorMessage || "Validated for transmission."}
                         </p>
                       </div>
 
-                      <span
-                        className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getSmsStatusClasses(
-                          currentSmsStatus
-                        )}`}
-                      >
-                        {currentSmsStatus}
-                      </span>
-                    </div>
-
-                    <div className="mt-4 space-y-2 text-sm text-gray-700">
-                      <p>
-                        <span className="font-medium text-gray-900">Recipient:</span>{" "}
-                        {latestSmsForSelected?.recipientPhone ?? "Not available yet"}
-                      </p>
-                      <p>
-                        <span className="font-medium text-gray-900">Provider:</span>{" "}
-                        {latestSmsForSelected?.provider ?? "MockSMS / none yet"}
-                      </p>
-
-                      <div className="mt-3 rounded-md border border-gray-200 bg-white p-3 shadow-sm">
-                        <p className="mb-1 text-[10px] font-bold uppercase text-gray-400">
-                          Generated SMS Message Content:
-                        </p>
-                        <p className="text-xs italic leading-relaxed text-gray-600">
-                          {latestSmsForSelected?.messageText ||
-                            "Awaiting system sync to generate message..."}
-                        </p>
+                      <div className="mt-4">
+                        <button
+                          onClick={handleSendSms}
+                          disabled={smsSending}
+                          className="inline-flex items-center gap-2 rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-900 disabled:opacity-50"
+                        >
+                          <Send className="h-4 w-4" />
+                          {smsSending ? "Sending..." : "Send SMS Notice"}
+                        </button>
                       </div>
-
-                      <p className="mt-2">
-                        <span className="font-medium text-gray-900">Latest Result:</span>{" "}
-                        {latestSmsForSelected?.errorMessage || "Validated for transmission."}
-                      </p>
-                    </div>
-
-                    <div className="mt-4">
-                      <button
-                        onClick={handleSendSms}
-                        disabled={smsSending}
-                        className="inline-flex items-center gap-2 rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-white transition hover:bg-gray-900 disabled:opacity-50"
-                      >
-                        <Send className="h-4 w-4" />
-                        {smsSending ? "Sending..." : "Send SMS Notice"}
-                      </button>
                     </div>
                   </div>
                 </div>
-              </div>
+              )}
 
               <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-6">
                 <div className="flex items-center gap-2">
