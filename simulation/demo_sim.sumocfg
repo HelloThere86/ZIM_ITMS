@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    demo_sim.sumocfg — SUMO config for the supervisor demo.
+
+    UPDATE THE TWO LINES BELOW to point at your existing network and route files.
+    These are the same files used by marl_sim.sumocfg — just copy those paths here.
+
+    If your training config uses additional files (e.g. additional.xml for
+    detectors or bus stops) add them inside the <input> block too.
+-->
+<configuration>
+    <input>
+        <!-- ⚠️  EDIT THESE two lines to match your existing file names -->
+        <net-file   value="marl_net1.net.xml"/>
+        <route-files value="routes1.rou.xml"/>
+    </input>
+
+    <time>
+        <!-- Demo runs for 1200 simulated seconds (~20 min of traffic).
+             Short enough to hold attention, long enough to show the
+             MARL advantage clearly.  Change if you prefer a different length. -->
+        <begin value="0"/>
+        <end   value="1200"/>
+    </time>
+
+    <processing>
+        <!-- Teleport vehicles that are stuck for more than 300s so the
+             demo never freezes completely under the fixed-time controller. -->
+        <time-to-teleport value="300"/>
+        <collision.action  value="warn"/>
+    </processing>
+
+    <gui_only>
+        <!-- Slow the simulation down to ~5x real-time so the lecturers
+             can actually see the traffic moving.  Remove or set to 0
+             for maximum speed. -->
+        <delay value="20"/>
+    </gui_only>
+</configuration>

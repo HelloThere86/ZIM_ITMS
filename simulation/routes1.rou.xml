@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+    <vType id="normal" accel="2.0" decel="4.5" sigma="0.5" length="5" minGap="2.5" maxSpeed="15" 
+           speedFactor="1.0" speedDev="0.1" guiShape="passenger"/>
+           
+    <vType id="kombi" accel="2.5" decel="5.0" sigma="0.7" length="6" minGap="2.0" maxSpeed="18" 
+           speedFactor="1.1" speedDev="0.1" laneChangeModel="SL2015" 
+           lcStrategic="1.0" lcCooperative="0.5" lcAssertive="2" 
+           jmDriveAfterRedTime="0.5" guiShape="bus"/>
+           
+    <vType id="mshikashika" accel="3.0" decel="6.0" sigma="0.8" length="4" minGap="1.5" maxSpeed="20" 
+           speedFactor="1.2" speedDev="0.2" laneChangeModel="SL2015" 
+           lcStrategic="1.0" lcCooperative="0.2" lcAssertive="5" 
+           jmDriveAfterRedTime="1.0" guiShape="passenger/hatchback"/>
+           
+    <vType id="truck" accel="1.0" decel="3.0" sigma="0.2" length="12" minGap="4.0" maxSpeed="10" 
+           guiShape="truck"/>
+
+    <route id="WE_Straight" edges="left0A0 A0B0 B0right0"/>
+    <route id="EW_Straight" edges="right0B0 B0A0 A0left0"/>
+    
+    <route id="WE_Turn_A0" edges="left0A0 A0bottom0"/>
+    <route id="WE_Turn_B0" edges="left0A0 A0B0 B0bottom1"/>
+    <route id="EW_Turn_B0" edges="right0B0 B0top1"/>
+    <route id="EW_Turn_A0" edges="right0B0 B0A0 A0top0"/>
+
+    <route id="A0_NS" edges="top0A0 A0bottom0"/>
+    <route id="A0_SN" edges="bottom0A0 A0top0"/>
+    <route id="B0_NS" edges="top1B0 B0bottom1"/>
+    <route id="B0_SN" edges="bottom1B0 B0top1"/>
+
+    <flow id="WE_Wave1" type="normal" route="WE_Straight" begin="0" end="400" probability="0.30" color="1,1,1"/>
+    <flow id="WE_Kombi_Wave1" type="kombi" route="WE_Straight" begin="0" end="400" probability="0.10" color="1,1,0"/>
+    <flow id="EW_Wave1" type="normal" route="EW_Straight" begin="0" end="400" probability="0.25" color="1,1,1"/>
+    <flow id="EW_Mshika_Wave1" type="mshikashika" route="EW_Straight" begin="0" end="400" probability="0.15" color="1,0.5,0"/>
+    <flow id="EW_Truck_Wave1" type="truck" route="EW_Straight" begin="0" end="400" probability="0.05" color="1,0,0"/>
+    <flow id="A0_NS_Light1" type="normal" route="A0_NS" begin="0" end="400" probability="0.05"/>
+    <flow id="B0_SN_Light1" type="normal" route="B0_SN" begin="0" end="400" probability="0.05"/>
+
+
+    <flow id="A0_NS_Wave2" type="normal" route="A0_NS" begin="400" end="800" probability="0.35" color="1,1,1"/>
+    <flow id="A0_SN_Wave2" type="kombi" route="A0_SN" begin="400" end="800" probability="0.15" color="1,1,0"/>
+    <flow id="B0_NS_Wave2" type="normal" route="B0_NS" begin="400" end="800" probability="0.30" color="1,1,1"/>
+    <flow id="B0_SN_Wave2" type="mshikashika" route="B0_SN" begin="400" end="800" probability="0.20" color="1,0.5,0"/>
+    <flow id="WE_Light2" type="normal" route="WE_Straight" begin="400" end="800" probability="0.05"/>
+    <flow id="EW_Light2" type="normal" route="EW_Straight" begin="400" end="800" probability="0.05"/>
+
+
+    <flow id="WE_Turn_Wave3" type="normal" route="WE_Turn_A0" begin="800" end="1200" probability="0.25"/>
+    <flow id="EW_Turn_Wave3" type="kombi" route="EW_Turn_B0" begin="800" end="1200" probability="0.20"/>
+    <flow id="WE_Straight_Wave3" type="normal" route="WE_Straight" begin="800" end="1200" probability="0.10"/>
+    <flow id="A0_NS_Wave3" type="normal" route="A0_NS" begin="800" end="1200" probability="0.15"/>
+    <flow id="B0_SN_Wave3" type="normal" route="B0_SN" begin="800" end="1200" probability="0.15"/>
+
+</routes>

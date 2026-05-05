@@ -25,6 +25,68 @@ import {
 
 type StatusFilter = "All" | EvidenceStatus;
 
+interface SimilarRegisteredPlate {
+  plate: string;
+  score: number;
+  distance: number;
+  format: string;
+}
+
+interface ReviewData {
+  detectedClass?: string;
+  ocrPlate?: string;
+  registered?: boolean;
+  registryStatus?: string;
+  registryLookupMode?: string;
+  ocrReliable?: boolean;
+  ocrMethod?: string;
+  ocrCount?: number;
+  ocrWeight?: number;
+  ocrPeakConfidence?: number;
+  similarRegisteredPlates?: SimilarRegisteredPlate[];
+  triggerReason?: string;
+  trackId?: number | string;
+  ocrStatus?: string;
+  videoStatus?: string;
+  tracker?: string;
+  officerNote?: string;
+}
+
+function parseReviewData(notes?: string | null): ReviewData | null {
+  if (!notes) return null;
+
+  const marker = "ReviewData=";
+  const startIndex = notes.indexOf(marker);
+
+  if (startIndex === -1) return null;
+
+  const jsonStart = notes.indexOf('{', startIndex);
+  const jsonEnd = notes.lastIndexOf('}');
+
+  if (jsonStart === -1 || jsonEnd === -1 || jsonStart > jsonEnd) return null;
+
+  const jsonText = notes.slice(jsonStart, jsonEnd + 1);
+
+  let extractedOfficerNote: string | undefined = undefined;
+  const officerMarker = "[OFFICER_REVIEW=";
+  const officerIndex = notes.indexOf(officerMarker);
+  
+  if (officerIndex !== -1) {
+    const endBracket = notes.indexOf(']', officerIndex);
+    if (endBracket !== -1) {
+      extractedOfficerNote = notes.slice(officerIndex + officerMarker.length, endBracket);
+    }
+  }
+
+  try {
+    const parsedData = JSON.parse(jsonText) as ReviewData;
+    return { ...parsedData, officerNote: extractedOfficerNote };
+  } catch (err) {
+    console.error("JSON parse failed in parseReviewData:", err);
+    return null;
+  }
+}
+
 const ITEMS_PER_PAGE = 10;
 
 export function EvidenceSearchPage() {
@@ -234,6 +296,8 @@ export function EvidenceSearchPage() {
 
     logView();
   }, [selectedRecord]);
+
+  const selectedReviewData = parseReviewData(selectedRecord?.notes);
 
   return (
     <div className="space-y-8">
@@ -597,12 +661,64 @@ export function EvidenceSearchPage() {
                 </div>
 
                 <div className="flex items-start gap-3 rounded-lg border border-gray-200 px-4 py-3">
-                  <FileText className="mt-0.5 h-4 w-4 text-gray-500" />
-                  <div>
-                    <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-                      Notes
-                    </p>
-                    <p className="text-sm font-medium text-gray-900">{selectedRecord.notes}</p>
+                  <FileText className="mt-0.5 h-4 w-4 shrink-0 text-gray-500" />
+                  <div className="w-full">
+                    <p className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-500">Detection Notes</p>
+                    
+                    {selectedReviewData ? (
+                      <div className="space-y-4">
+                        <div className="divide-y divide-gray-200 rounded-md border border-gray-200 bg-white text-sm">
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">Vehicle Class</span>
+                            <span className="capitalize text-gray-900">{selectedReviewData.detectedClass?.replace("_", " ") || "Unknown"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">OCR Plate</span>
+                            <span className="text-gray-900">{selectedReviewData.ocrPlate || "UNKNOWN"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">Registered</span>
+                            <span className="text-gray-900">{selectedReviewData.registered ? "Yes" : "No"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">Registry Status</span>
+                            <span className="text-gray-900">{selectedReviewData.registryStatus || "N/A"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">OCR Status</span>
+                            <span className="text-gray-900">{selectedReviewData.ocrStatus || "N/A"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">OCR Confidence</span>
+                            <span className="text-gray-900">{selectedReviewData.ocrPeakConfidence !== undefined ? `${selectedReviewData.ocrPeakConfidence}%` : "0.0%"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">Video Status</span>
+                            <span className="text-gray-900">{selectedReviewData.videoStatus || "N/A"}</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">Tracker</span>
+                            <span className="text-gray-900">
+                              {selectedReviewData.tracker || "N/A"} {selectedReviewData.trackId ? `(ID: ${selectedReviewData.trackId})` : ""}
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-4 px-4 py-2.5">
+                            <span className="font-medium text-gray-500">Trigger Reason</span>
+                            <span className="capitalize text-gray-900">{selectedReviewData.triggerReason?.replace(/_/g, " ") || "N/A"}</span>
+                          </div>
+                        </div>
+                        
+                        {selectedReviewData.officerNote && (
+                          <div className="rounded border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+                            <span className="font-semibold text-blue-900">Officer Action:</span> {selectedReviewData.officerNote}
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-1 break-words text-sm font-medium text-gray-900">
+                        {selectedRecord.notes || "No notes available."}
+                      </p>
+                    )}
                   </div>
                 </div>
               </div>

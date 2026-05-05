@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  marl_routes.rou.xml  —  Cooperative MARL demo  (2×1 grid, A0 + B0)
+  =====================================================================
+
+  DEMAND DESIGN
+  ─────────────
+  The scenario is built to make the shared corridor (A0B0 / B0A0) the
+  bottleneck so both signals *must* cooperate.
+
+  Three phases:
+    warm-up   t =   0 – 60   low  demand  (queues build gently)
+    peak      t =  60 – 480  high demand  (queues spill back across the
+                                           corridor, forcing cooperation)
+    wind-down t = 480 – 600  low  demand  (clears any residual queue)
+
+  Vehicle type mix (peak flows):
+    normal      ~50 %   well-behaved passenger cars
+    kombi       ~25 %   Harare minibus: slightly pushy, packs tight
+    mshikashika ~15 %   informal share-taxi: aggressive gap acceptance
+    truck       ~10 %   heavy vehicle: slow, long
+
+  VEHICLE TYPE CHANGES vs. original
+  ──────────────────────────────────
+  mshikashika  jmDriveAfterRedTime  4.0 → 1.5   (was causing collisions)
+               jmIgnoreFoeProb      0.2 → 0.05   (less reckless)
+               sigma                1.0 → 0.80
+  kombi        jmDriveAfterRedTime  2.0 → 0.5
+               jmDriveAfterYellowTime 5.0 → 2.0
+               sigma                0.9 → 0.70
+-->
+
+<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
+
+    <!-- ============================================================
+         VEHICLE TYPES
+         ============================================================ -->
+
+    <!-- Ordinary passenger car -->
+    <vType id="normal"
+           accel="2.0" decel="4.5" sigma="0.5"
+           length="5" minGap="2.5" maxSpeed="15"
+           speedFactor="1.0" speedDev="0.1"
+           jmIgnoreKeepClearTime="30.0"
+           guiShape="passenger"
+           color="1,1,1"/>
+
+    <!-- Kombi (Harare minibus): packs lanes, slightly impatient at signals -->
+    <vType id="kombi"
+           accel="3.0" decel="5.5" sigma="0.70"
+           length="6" minGap="1.2" maxSpeed="18"
+           speedFactor="1.15" speedDev="0.15"
+           laneChangeModel="SL2015"
+           lcStrategic="1.0" lcSpeedGain="6.0" lcCooperative="0.1"
+           lcPushy="0.8" lcAssertive="4" lcImpatience="0.6"
+           jmDriveAfterRedTime="0.5"
+           jmDriveAfterYellowTime="2.0"
+           jmIgnoreKeepClearTime="2.0"
+           guiShape="bus"
+           color="1,1,0"/>
+
+    <!-- Mshikashika (informal share taxi): aggressive but not suicidal -->
+    <vType id="mshikashika"
+           accel="3.5" decel="6.0" sigma="0.80"
+           length="4" minGap="0.8" maxSpeed="22"
+           speedFactor="1.25" speedDev="0.20"
+           laneChangeModel="SL2015"
+           lcStrategic="0.2" lcSpeedGain="12.0" lcCooperative="0.0"
+           lcPushy="1.0" lcAssertive="8" lcImpatience="0.9"
+           jmDriveAfterRedTime="1.5"
+           jmDriveAfterYellowTime="3.0"
+           jmIgnoreKeepClearTime="0.5"
+           jmIgnoreFoeProb="0.05"
+           guiShape="passenger/hatchback"
+           color="1,0.5,0"/>
+
+    <!-- Truck: slow, long, obedient -->
+    <vType id="truck"
+           accel="0.8" decel="3.0" sigma="0.2"
+           length="12" minGap="4.0" maxSpeed="10"
+           jmIgnoreKeepClearTime="0.1"
+           guiShape="truck"
+           color="1,0,0"/>
+
+    <!-- ============================================================
+         ROUTES
+         Naming convention:
+           WE  = West → East   (enters at left0, exits at right0)
+           EW  = East → West   (enters at right0, exits at left0)
+           A0_ = North↕South through intersection A0 only
+           B0_ = North↕South through intersection B0 only
+         ============================================================ -->
+
+    <!-- Through corridor – both intersections -->
+    <route id="WE_Straight" edges="left0A0 A0B0 B0right0"/>
+    <route id="EW_Straight" edges="right0B0 B0A0 A0left0"/>
+
+    <!-- Turning at A0 -->
+    <route id="WE_TurnSouth_A0" edges="left0A0 A0bottom0"/>
+    <route id="EW_TurnNorth_A0" edges="right0B0 B0A0 A0top0"/>
+
+    <!-- Turning at B0 -->
+    <route id="WE_TurnSouth_B0" edges="left0A0 A0B0 B0bottom1"/>
+    <route id="EW_TurnNorth_B0" edges="right0B0 B0top1"/>
+
+    <!-- North–South through A0 only -->
+    <route id="A0_NS" edges="top0A0 A0bottom0"/>
+    <route id="A0_SN" edges="bottom0A0 A0top0"/>
+
+    <!-- North–South through B0 only -->
+    <route id="B0_NS" edges="top1B0 B0bottom1"/>
+    <route id="B0_SN" edges="bottom1B0 B0top1"/>
+
+    <!-- ============================================================
+         FLOWS
+         period = average headway in seconds  (3600 / veh·h⁻¹)
+
+         Warm-up  t=0–60     : period ×3  (sparse)
+         Peak     t=60–480   : base period (heavy)
+         Wind-down t=480–600 : period ×4  (sparse)
+
+         Through traffic is heaviest — it must use the shared corridor
+         and creates the queue spillback that forces cooperation.
+         N-S demand is moderate and competes with through traffic at
+         each intersection independently.
+         ============================================================ -->
+
+    <!-- ── WARM-UP  (t = 0 – 60) ─────────────────────────────── -->
+
+    <flow id="wu_WE_normal"  type="normal"      route="WE_Straight"      begin="0"  end="60"  period="45" color="1,1,1"/>
+    <flow id="wu_EW_normal"  type="normal"      route="EW_Straight"      begin="0"  end="60"  period="45" color="1,1,1"/>
+    <flow id="wu_WE_kombi"   type="kombi"       route="WE_Straight"      begin="0"  end="60"  period="90" color="1,1,0"/>
+    <flow id="wu_EW_kombi"   type="kombi"       route="EW_Straight"      begin="0"  end="60"  period="90" color="1,1,0"/>
+    <flow id="wu_A0_NS"      type="normal"      route="A0_NS"            begin="0"  end="60"  period="60" color="1,1,1"/>
+    <flow id="wu_A0_SN"      type="normal"      route="A0_SN"            begin="0"  end="60"  period="60" color="1,1,1"/>
+    <flow id="wu_B0_NS"      type="normal"      route="B0_NS"            begin="0"  end="60"  period="60" color="1,1,1"/>
+    <flow id="wu_B0_SN"      type="normal"      route="B0_SN"            begin="0"  end="60"  period="60" color="1,1,1"/>
+
+    <!-- ── PEAK  (t = 60 – 480) ───────────────────────────────── -->
+
+    <!-- Through traffic  (main cooperation stress)
+         240 veh/h each direction → 1 vehicle per 15 s
+         Split by type:  normal 50 %  kombi 25 %  mshi 15 %  truck 10 % -->
+
+    <!-- WE through -->
+    <flow id="pk_WE_normal"  type="normal"      route="WE_Straight"      begin="60" end="480" period="30"  color="1,1,1"/>
+    <flow id="pk_WE_kombi"   type="kombi"       route="WE_Straight"      begin="60" end="480" period="60"  color="1,1,0"/>
+    <flow id="pk_WE_mshi"    type="mshikashika" route="WE_Straight"      begin="60" end="480" period="100" color="1,0.5,0"/>
+    <flow id="pk_WE_truck"   type="truck"       route="WE_Straight"      begin="60" end="480" period="150" color="1,0,0"/>
+
+    <!-- EW through -->
+    <flow id="pk_EW_normal"  type="normal"      route="EW_Straight"      begin="60" end="480" period="30"  color="1,1,1"/>
+    <flow id="pk_EW_kombi"   type="kombi"       route="EW_Straight"      begin="60" end="480" period="60"  color="1,1,0"/>
+    <flow id="pk_EW_mshi"    type="mshikashika" route="EW_Straight"      begin="60" end="480" period="100" color="1,0.5,0"/>
+    <flow id="pk_EW_truck"   type="truck"       route="EW_Straight"      begin="60" end="480" period="150" color="1,0,0"/>
+
+    <!-- WE turning south at A0  (~60 veh/h → 1/60 s) -->
+    <flow id="pk_WE_sA0_n"   type="normal"      route="WE_TurnSouth_A0"  begin="60" end="480" period="60"  color="1,1,1"/>
+    <flow id="pk_WE_sA0_k"   type="kombi"       route="WE_TurnSouth_A0"  begin="60" end="480" period="120" color="1,1,0"/>
+    <flow id="pk_WE_sA0_m"   type="mshikashika" route="WE_TurnSouth_A0"  begin="60" end="480" period="200" color="1,0.5,0"/>
+
+    <!-- WE turning south at B0  (~60 veh/h) -->
+    <flow id="pk_WE_sB0_n"   type="normal"      route="WE_TurnSouth_B0"  begin="60" end="480" period="60"  color="1,1,1"/>
+    <flow id="pk_WE_sB0_k"   type="kombi"       route="WE_TurnSouth_B0"  begin="60" end="480" period="120" color="1,1,0"/>
+
+    <!-- EW turning north at A0  (~60 veh/h) -->
+    <flow id="pk_EW_nA0_n"   type="normal"      route="EW_TurnNorth_A0"  begin="60" end="480" period="60"  color="1,1,1"/>
+    <flow id="pk_EW_nA0_k"   type="kombi"       route="EW_TurnNorth_A0"  begin="60" end="480" period="120" color="1,1,0"/>
+    <flow id="pk_EW_nA0_m"   type="mshikashika" route="EW_TurnNorth_A0"  begin="60" end="480" period="200" color="1,0.5,0"/>
+
+    <!-- EW turning north at B0  (~60 veh/h) -->
+    <flow id="pk_EW_nB0_n"   type="normal"      route="EW_TurnNorth_B0"  begin="60" end="480" period="60"  color="1,1,1"/>
+    <flow id="pk_EW_nB0_k"   type="kombi"       route="EW_TurnNorth_B0"  begin="60" end="480" period="120" color="1,1,0"/>
+
+    <!-- N–S at A0  (~120 veh/h → 1/30 s split across types) -->
+    <flow id="pk_A0NS_n"     type="normal"      route="A0_NS"            begin="60" end="480" period="40"  color="1,1,1"/>
+    <flow id="pk_A0NS_k"     type="kombi"       route="A0_NS"            begin="60" end="480" period="80"  color="1,1,0"/>
+    <flow id="pk_A0NS_m"     type="mshikashika" route="A0_NS"            begin="60" end="480" period="133" color="1,0.5,0"/>
+    <flow id="pk_A0NS_t"     type="truck"       route="A0_NS"            begin="60" end="480" period="300" color="1,0,0"/>
+
+    <!-- S–N at A0 -->
+    <flow id="pk_A0SN_n"     type="normal"      route="A0_SN"            begin="60" end="480" period="40"  color="1,1,1"/>
+    <flow id="pk_A0SN_k"     type="kombi"       route="A0_SN"            begin="60" end="480" period="80"  color="1,1,0"/>
+    <flow id="pk_A0SN_m"     type="mshikashika" route="A0_SN"            begin="60" end="480" period="133" color="1,0.5,0"/>
+
+    <!-- N–S at B0 -->
+    <flow id="pk_B0NS_n"     type="normal"      route="B0_NS"            begin="60" end="480" period="40"  color="1,1,1"/>
+    <flow id="pk_B0NS_k"     type="kombi"       route="B0_NS"            begin="60" end="480" period="80"  color="1,1,0"/>
+    <flow id="pk_B0NS_m"     type="mshikashika" route="B0_NS"            begin="60" end="480" period="133" color="1,0.5,0"/>
+    <flow id="pk_B0NS_t"     type="truck"       route="B0_NS"            begin="60" end="480" period="300" color="1,0,0"/>
+
+    <!-- S–N at B0 -->
+    <flow id="pk_B0SN_n"     type="normal"      route="B0_SN"            begin="60" end="480" period="40"  color="1,1,1"/>
+    <flow id="pk_B0SN_k"     type="kombi"       route="B0_SN"            begin="60" end="480" period="80"  color="1,1,0"/>
+    <flow id="pk_B0SN_m"     type="mshikashika" route="B0_SN"            begin="60" end="480" period="133" color="1,0.5,0"/>
+
+    <!-- ── WIND-DOWN  (t = 480 – 600) ────────────────────────── -->
+
+    <flow id="wd_WE_normal"  type="normal"      route="WE_Straight"      begin="480" end="600" period="60"  color="1,1,1"/>
+    <flow id="wd_EW_normal"  type="normal"      route="EW_Straight"      begin="480" end="600" period="60"  color="1,1,1"/>
+    <flow id="wd_WE_kombi"   type="kombi"       route="WE_Straight"      begin="480" end="600" period="120" color="1,1,0"/>
+    <flow id="wd_EW_kombi"   type="kombi"       route="EW_Straight"      begin="480" end="600" period="120" color="1,1,0"/>
+    <flow id="wd_A0_NS"      type="normal"      route="A0_NS"            begin="480" end="600" period="90"  color="1,1,1"/>
+    <flow id="wd_A0_SN"      type="normal"      route="A0_SN"            begin="480" end="600" period="90"  color="1,1,1"/>
+    <flow id="wd_B0_NS"      type="normal"      route="B0_NS"            begin="480" end="600" period="90"  color="1,1,1"/>
+    <flow id="wd_B0_SN"      type="normal"      route="B0_SN"            begin="480" end="600" period="90"  color="1,1,1"/>
+
+</routes>

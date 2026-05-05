@@ -343,7 +343,6 @@ def get_review_queue():
 
     return cases
 
-
 @app.post("/api/review-queue/{violation_code}/decision")
 def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
     if payload.decision not in ["Approved", "Rejected"]:
@@ -355,126 +354,156 @@ def decide_review_case(violation_code: str, payload: ReviewDecisionRequest):
     conn = get_db()
     c = conn.cursor()
 
-    c.execute(
-        """
-        SELECT violation_id, plate_number, status, reviewer_user_id, reviewed_at, review_note
-        FROM violation
-        WHERE violation_id = ?
-        """,
-        (violation_id,),
-    )
-    existing = c.fetchone()
-
-    if not existing:
-        conn.close()
-        raise HTTPException(status_code=404, detail="Violation not found")
-
-    final_plate = existing["plate_number"]
-
-    if payload.decision == "Approved" and corrected_plate:
-        plate_exists = c.execute(
-            "SELECT 1 FROM vehicle WHERE plate_number = ? LIMIT 1",
-            (corrected_plate,),
-        ).fetchone()
-
-        if not plate_exists:
-            conn.close()
-            raise HTTPException(
-                status_code=400,
-                detail=f"Corrected plate {corrected_plate} is not in the vehicle registry",
-            )
-
-        final_plate = corrected_plate
-
-    old_state = {
-        "plate_number": existing["plate_number"],
-        "status": existing["status"],
-        "reviewer_user_id": existing["reviewer_user_id"],
-        "reviewed_at": existing["reviewed_at"],
-        "review_note": existing["review_note"],
-    }
-
-    reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    existing_note = existing["review_note"] or ""
-    officer_note = payload.note or ""
-
-    if corrected_plate and payload.decision == "Approved":
-        officer_note = (
-            f"{officer_note} | Officer confirmed plate: {corrected_plate}"
-            if officer_note
-            else f"Officer confirmed plate: {corrected_plate}"
+    # Wrap everything in a try block to ensure the database NEVER gets locked
+    try:
+        c.execute(
+            """
+            SELECT violation_id, plate_number, status, reviewer_user_id, reviewed_at, review_note
+            FROM violation
+            WHERE violation_id = ?
+            """,
+            (violation_id,),
         )
+        existing = c.fetchone()
 
-    updated_note = existing_note
-    if officer_note:
-        updated_note = f"{existing_note} [OFFICER_REVIEW={officer_note}]" if existing_note else officer_note
+        if not existing:
+            raise HTTPException(status_code=404, detail="Violation not found")
 
-    c.execute(
-        """
-        UPDATE violation
-        SET status = ?,
-            decision_type = 'Flagged',
-            plate_number = ?,
-            reviewer_user_id = ?,
-            reviewed_at = ?,
-            review_note = ?
-        WHERE violation_id = ?
-        """,
-        (
-            payload.decision,
-            final_plate,
-            payload.reviewerUserId,
-            reviewed_at,
-            updated_note,
-            violation_id,
-        ),
-    )
+        final_plate = existing["plate_number"]
 
-    sms_result = None
-    if payload.decision == "Approved":
-        try:
-            sms_result = process_sms_for_violation(
-                conn=conn,
-                violation_id=violation_id,
-                user_id=payload.reviewerUserId,
-                note="Automatic SMS after human approval",
+        # Guard clause for UNKNOWN plates
+        if (not final_plate or final_plate == "UNKNOWN") and not corrected_plate:
+            print(f"DEBUG: Rejecting case V-{violation_id} automatically - Plate is UNKNOWN.")
+            c.execute(
+                "UPDATE violation SET status = 'Rejected', review_note = 'Case automatically rejected: Unreadable license plate.' WHERE violation_id = ?",
+                (violation_id,)
             )
-        except Exception as sms_err:
-            sms_result = {
-                "status": "Failed",
-                "error": str(sms_err),
+            conn.commit()
+            return {
+                "message": "Case automatically rejected due to unreadable (UNKNOWN) license plate.",
+                "status": "Rejected",
+                "plateNumber": "UNKNOWN",
+                "smsResult": None
             }
 
-    new_state = {
-        "plate_number": final_plate,
-        "status": payload.decision,
-        "reviewer_user_id": payload.reviewerUserId,
-        "reviewed_at": reviewed_at,
-        "review_note": updated_note,
-    }
+        # If approving with a correction, verify the corrected plate exists
+        if payload.decision == "Approved" and corrected_plate:
+            plate_exists = c.execute(
+                "SELECT 1 FROM vehicle WHERE plate_number = ? LIMIT 1",
+                (corrected_plate,),
+            ).fetchone()
 
-    write_audit_log(
-        conn=conn,
-        user_id=payload.reviewerUserId,
-        action_type=f"Review {payload.decision}",
-        entity_type="Violation",
-        entity_id=f"V-{violation_id}",
-        old_value=old_state,
-        new_value=new_state,
-        note=officer_note or f"Violation marked as {payload.decision}",
-    )
+            if not plate_exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Corrected plate {corrected_plate} is not in the vehicle registry",
+                )
+            final_plate = corrected_plate
 
-    conn.commit()
-    conn.close()
+        old_state = {
+            "plate_number": existing["plate_number"],
+            "status": existing["status"],
+            "reviewer_user_id": existing["reviewer_user_id"],
+            "reviewed_at": existing["reviewed_at"],
+            "review_note": existing["review_note"],
+        }
 
-    return {
-        "message": f"Violation V-{violation_id} updated successfully",
-        "status": payload.decision,
-        "plateNumber": final_plate,
-        "smsResult": sms_result,
-    }
+        reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        existing_note = existing["review_note"] or ""
+        officer_note = payload.note or ""
 
+        if corrected_plate and payload.decision == "Approved":
+            officer_note = (
+                f"{officer_note} | Officer confirmed plate: {corrected_plate}"
+                if officer_note
+                else f"Officer confirmed plate: {corrected_plate}"
+            )
+
+        updated_note = existing_note
+        if officer_note:
+            updated_note = f"{existing_note} [OFFICER_REVIEW={officer_note}]" if existing_note else officer_note
+
+        # THE FIX: Only update the plate_number in the DB if you actually corrected it.
+        # Otherwise, just update the status to Rejected.
+        if corrected_plate:
+            c.execute(
+                """
+                UPDATE violation
+                SET status = ?,
+                    decision_type = 'Flagged',
+                    plate_number = ?,
+                    reviewer_user_id = ?,
+                    reviewed_at = ?,
+                    review_note = ?
+                WHERE violation_id = ?
+                """,
+                (payload.decision, final_plate, payload.reviewerUserId, reviewed_at, updated_note, violation_id),
+            )
+        else:
+            c.execute(
+                """
+                UPDATE violation
+                SET status = ?,
+                    decision_type = 'Flagged',
+                    reviewer_user_id = ?,
+                    reviewed_at = ?,
+                    review_note = ?
+                WHERE violation_id = ?
+                """,
+                (payload.decision, payload.reviewerUserId, reviewed_at, updated_note, violation_id),
+            )
+
+        sms_result = None
+        if payload.decision == "Approved":
+            try:
+                sms_result = process_sms_for_violation(
+                    conn=conn,
+                    violation_id=violation_id,
+                    user_id=payload.reviewerUserId,
+                    note="Automatic SMS after human approval",
+                )
+            except Exception as sms_err:
+                sms_result = {
+                    "status": "Failed",
+                    "error": str(sms_err),
+                }
+
+        new_state = {
+            "plate_number": final_plate,
+            "status": payload.decision,
+            "reviewer_user_id": payload.reviewerUserId,
+            "reviewed_at": reviewed_at,
+            "review_note": updated_note,
+        }
+
+        write_audit_log(
+            conn=conn,
+            user_id=payload.reviewerUserId,
+            action_type=f"Review {payload.decision}",
+            entity_type="Violation",
+            entity_id=f"V-{violation_id}",
+            old_value=old_state,
+            new_value=new_state,
+            note=officer_note or f"Violation marked as {payload.decision}",
+        )
+
+        conn.commit()
+        return {
+            "message": f"Violation V-{violation_id} updated successfully",
+            "status": payload.decision,
+            "plateNumber": final_plate,
+            "smsResult": sms_result,
+        }
+
+    except sqlite3.IntegrityError as e:
+        # If any foreign key issues still happen, we rollback so the DB doesn't lock!
+        conn.rollback()
+        print(f"DEBUG: IntegrityError caught: {e}")
+        raise HTTPException(status_code=400, detail="Database integrity error: Cannot reject. Ensure UI passes correct User ID.")
+    
+    finally:
+        # This will ALWAYS execute, meaning your database will never lock up during the demo
+        conn.close()
 
 @app.get("/api/evidence-search")
 def get_evidence_search(

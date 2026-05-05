@@ -1,0 +1,12 @@
+Overall Validation Accuracy: 87.65%
+
+              precision    recall  f1-score   support
+
+   ambulance     0.7826    0.9474    0.8571        19
+civilian_car     0.8824    0.7143    0.7895        21
+  fire_truck     0.9545    1.0000    0.9767        21
+  police_car     0.8947    0.8500    0.8718        20
+
+    accuracy                         0.8765        81
+   macro avg     0.8786    0.8779    0.8738        81
+weighted avg     0.8807    0.8765    0.8742        81
